@@ -30,7 +30,16 @@ function startHealthPolling() {
   healthInterval = setInterval(check, 30000);
 }
 
+// Load custom background image from localStorage
+function loadBgImage() {
+  const url = localStorage.getItem('asr_bg_image');
+  if (url) {
+    document.body.style.setProperty('--bg-image', `url("${url.replace(/"/g, '\\"')}")`);
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  loadBgImage();
   initNavbar();
   startHealthPolling();
   initRouter();

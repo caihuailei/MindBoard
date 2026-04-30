@@ -24,10 +24,18 @@ ALIGNER_PATH = str(BASE_DIR / "models" / "Qwen3-ForcedAligner-0.6B")
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 TEMP_DIR = Path(tempfile.gettempdir()) / "asr_api"
 TEMP_DIR.mkdir(exist_ok=True)
+RESULTS_DIR = BASE_DIR / "results"
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 @asynccontextmanager
 async def _lifespan(app):
-    """启动时创建清理任务、输出目录，关闭时清理"""
+    """启动时清理残留 chunk、创建目录、启动定时清理"""
+    # Clean up leftover chunk files from interrupted sessions
+    for cf in RESULTS_DIR.glob("*_chunk_*.json"):
+        try:
+            cf.unlink()
+        except Exception:
+            pass
     output_dir = BASE_DIR / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     cleanup_task = asyncio.create_task(_cleanup_old_progress())
@@ -258,43 +266,74 @@ async def transcribe_status(file_id: str):
         return {"file_id": file_id, **p}
 
 
+@app.get("/transcribe_stream/{file_id}")
+def transcribe_stream(file_id: str):
+    """SSE 流式推送转写进度，前端用 fetch + ReadableStream 接收"""
+    from fastapi.responses import StreamingResponse
+
+    def event_stream():
+        last_words_len = 0
+        while True:
+            with _progress_lock:
+                p = _transcription_progress.get(file_id)
+                if p is None:
+                    yield f"data: {json.dumps({'status': 'not_found'}, ensure_ascii=False)}\n\n"
+                    break
+
+                status = p.get("status", "")
+                chunks_done = p.get("chunks_done", 0)
+                total_duration = p.get("total_duration", 0)
+                words = p.get("words", [])
+                full_text = p.get("full_text", "")
+                segments = p.get("segments", [])
+                duration_sec = p.get("duration_sec", 0)
+                language = p.get("language", "")
+
+                # Only send words if changed
+                words_data = words if len(words) != last_words_len else []
+                if words_data:
+                    last_words_len = len(words)
+
+                payload = {
+                    "status": status,
+                    "chunks_done": chunks_done,
+                    "total_duration": total_duration,
+                    "words": words_data,
+                }
+
+                if status == "completed":
+                    payload["full_text"] = full_text
+                    payload["segments"] = segments
+                    payload["duration_sec"] = duration_sec
+                    payload["language"] = language
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    break
+
+                if status == "error":
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    break
+
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+            import time
+            time.sleep(0.3)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 @app.get("/transcribe_list")
 async def transcribe_list():
     """列出所有进行中的转写任务"""
     with _progress_lock:
-        items = {k: {"status": v["status"], "chunks_done": v["chunks_done"], "total_duration": v["total_duration"]}
+        items = {k: {"status": v["status"], "chunks_done": v["chunks_done"],
+                     "total_duration": v["total_duration"], "source": v.get("source", "")}
                  for k, v in _transcription_progress.items()}
         return {"active": items}
 
 
-@app.post("/transcribe_url")
-def transcribe_url(
-    url: str = Form(..., description="音频/视频文件的直接下载链接"),
-    language: str = Form("Chinese"),
-    context: str = Form(""),
-    max_chars: int = Form(50),
-    pause_threshold: float = Form(0.3),
-):
-    """通过 URL 下载音视频 → ASR 转写（适合 AI agent 直接传链接）"""
-    import requests
-    mdl = load_model()
-    file_id = str(uuid.uuid4())[:8]
-    _update_progress(file_id, status="downloading")
-
-    # 从 URL 推断扩展名
-    url_path = url.split("?")[0]
-    ext = Path(url_path).suffix.lower() or ".wav"
-    input_path = TEMP_DIR / f"{file_id}{ext}"
-
-    # 下载文件
-    r = requests.get(url, stream=True, timeout=300)
-    r.raise_for_status()
-    with open(input_path, "wb") as f:
-        for chunk in r.iter_content(chunk_size=8192):
-            f.write(chunk)
-    _update_progress(file_id, status="downloaded")
-
-    return _transcribe_file(mdl, file_id, str(input_path), ext, language, context, max_chars, pause_threshold)
+# [已移除] POST /transcribe_url — 不再支持 URL 下载，只允许上传文件
 
 
 @app.post("/transcribe")
@@ -322,6 +361,11 @@ def transcribe(
 def _transcribe_file(mdl, file_id, input_path, ext, language, context, max_chars, pause_threshold):
     """内部：给定文件路径 → 转写 → 合并 → 返回结果"""
     video_exts = {".mp4", ".avi", ".mkv", ".mov", ".flv", ".wmv", ".webm", ".ts", ".mts"}
+
+    # 从进度中获取文件名
+    with _progress_lock:
+        filename = _transcription_progress.get(file_id, {}).get("filename", "unknown")
+
     try:
         audio_input = input_path
         if ext in video_exts:
@@ -329,7 +373,7 @@ def _transcribe_file(mdl, file_id, input_path, ext, language, context, max_chars
             extract_audio(input_path, wav_path)
             audio_input = wav_path
 
-        # 转写
+        # 转写 —— 每块同时落盘
         gen = mdl.transcribe_streaming(
             audio=audio_input,
             language=language,
@@ -337,36 +381,66 @@ def _transcribe_file(mdl, file_id, input_path, ext, language, context, max_chars
             return_time_stamps=True,
         )
 
-        # 收集所有带时间戳的词（同时更新进度）
-        all_words = []
+        all_words_in_mem = []  # 用于前端实时轮询（最近200词）
         total_duration = 0.0
         chunk_index = 0
         for chunk in gen:
             chunk_index += 1
             total_duration = max(total_duration, chunk.offset_sec + chunk.duration_sec)
+            chunk_words = []
             if chunk.time_stamps:
                 for item in chunk.time_stamps.items:
-                    all_words.append({
-                        "start": item.start_time,
-                        "end": item.end_time,
-                        "word": item.text,
-                    })
-            # 每处理完一个块，更新进度
+                    w = {"start": item.start_time, "end": item.end_time, "word": item.text}
+                    all_words_in_mem.append(w)
+                    chunk_words.append(w)
+
+            # 分块结果写入磁盘
+            if chunk_words:
+                cf = RESULTS_DIR / f"{file_id}_chunk_{chunk_index:04d}.json"
+                json.dump(chunk_words, open(cf, "w", encoding="utf-8"), ensure_ascii=False)
+
             _update_progress(file_id,
                              status="transcribing",
                              chunks_done=chunk_index,
                              total_duration=total_duration,
-                             words=list(all_words[-200:]))  # 只保留最近200词避免内存爆炸
+                             words=list(all_words_in_mem[-200:]))
 
-        # 自适应合并成句子
+        # 从磁盘读取所有分块用于合并
         _update_progress(file_id, status="merging", chunks_done=chunk_index, total_duration=total_duration)
-        segments = merge_segments_adaptive(all_words, max_chars=max_chars, pause_threshold=pause_threshold)
+        chunk_files = sorted(RESULTS_DIR.glob(f"{file_id}_chunk_*.json"))
+        all_words_from_disk = []
+        for cf in chunk_files:
+            try:
+                all_words_from_disk.extend(json.load(open(cf, "r", encoding="utf-8")))
+            except Exception:
+                pass
 
+        segments = merge_segments_adaptive(all_words_from_disk, max_chars=max_chars, pause_threshold=pause_threshold)
         full_text = "".join(s["text"] for s in segments)
+
+        # 最终结果写入磁盘（持久化）
+        result_data = {
+            "file_id": file_id,
+            "filename": filename,
+            "full_text": full_text,
+            "segments": segments,
+            "duration_sec": round(total_duration, 2),
+            "language": language,
+            "completed_at": time.time(),
+        }
+        json.dump(result_data, open(RESULTS_DIR / f"{file_id}.json", "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=2)
+
+        # 删除分块零碎文件
+        for cf in chunk_files:
+            try:
+                cf.unlink()
+            except Exception:
+                pass
 
         # 完成时保存完整结果到进度（供前端轮询），不删除
         _update_progress(file_id, status="completed", full_text=full_text, segments=segments,
-                         words=all_words, duration_sec=round(total_duration, 2),
+                         words=all_words_from_disk, duration_sec=round(total_duration, 2),
                          language=language)
 
         return {
@@ -376,7 +450,7 @@ def _transcribe_file(mdl, file_id, input_path, ext, language, context, max_chars
             "language": language,
             "duration_sec": round(total_duration, 2),
             "segments": segments,
-            "words": all_words,
+            "words": all_words_from_disk,
         }
 
     except Exception as e:
@@ -491,7 +565,7 @@ def _call_llm(api_key, api_url, model_name, system_prompt, user_text, temperatur
 @app.post("/refine")
 def refine_text(
     text: str = Form(..., description="待处理的文本"),
-    system_prompt: str = Form("你是一个专业的文档整理助手。请对以下课堂录音文本进行处理：\n1. 合并被切断的句子\n2. 修正ASR识别错误\n3. 补充专业术语的准确表述\n4. 恢复正确的标点符号\n5. 按语义分段，输出清晰的文档格式\n直接输出结果，不要多余的解释。"),
+    system_prompt: str = Form("你是一个专业的录音文本整理助手。请对以下课堂录音文本进行处理：\n1. 合并被音频切块切断的句子，确保语句完整通顺\n2. 修正ASR识别错误的词语\n3. 对专业术语进行准确的补充和规范化\n4. 恢复正确的标点符号和分段\n5. 按语义逻辑重新组织段落，输出清晰的文档格式\n6. 保留原文的语气和风格，不要过度改写\n7. 在末尾添加简短的内容概要\n直接输出结果，不要加任何解释、不要出现\"以下是对\"等AI相关表述。"),
     api_key: str = Form(""),
     api_url: str = Form("https://api.deepseek.com"),
     model_name: str = Form("deepseek-v4-flash"),
@@ -511,6 +585,45 @@ def refine_text(
     }
 
 
+@app.post("/refine_stream")
+async def refine_stream(
+    text: str = Form(..., description="待处理的文本"),
+    system_prompt: str = Form("你是一个专业的录音文本整理助手。请对以下课堂录音文本进行处理：\n1. 合并被音频切块切断的句子，确保语句完整通顺\n2. 修正ASR识别错误的词语\n3. 对专业术语进行准确的补充和规范化\n4. 恢复正确的标点符号和分段\n5. 按语义逻辑重新组织段落，输出清晰的文档格式\n6. 保留原文的语气和风格，不要过度改写\n7. 在末尾添加简短的内容概要\n直接输出结果，不要加任何解释、不要出现\"以下是对\"等AI相关表述。"),
+    api_key: str = Form(""),
+    api_url: str = Form("https://api.deepseek.com"),
+    model_name: str = Form("deepseek-v4-flash"),
+    temperature: float = Form(0.3),
+):
+    """流式 LLM 润色，返回 SSE 事件流，前端逐字展示"""
+    if not api_key:
+        raise HTTPException(status_code=400, detail="需要提供 API Key")
+
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key, base_url=api_url)
+
+    def event_stream():
+        try:
+            stream = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text},
+                ],
+                temperature=temperature,
+                stream=True,
+            )
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    yield f"data: {json.dumps({'text': content}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 @app.post("/full_pipeline")
 def full_pipeline(
     file: UploadFile = File(...),
@@ -520,7 +633,7 @@ def full_pipeline(
     api_key: str = Form("", description="LLM API Key"),
     api_url: str = Form("https://api.deepseek.com", description="LLM API URL"),
     model_name: str = Form("deepseek-v4-flash", description="LLM 模型名"),
-    system_prompt: str = Form("你是一个专业的课堂笔记整理助手。请对以下课堂录音文本进行处理：\n1. 合并被音频切块切断的句子\n2. 修正ASR识别错误的词语\n3. 对专业术语进行准确的补充和规范化\n4. 恢复正确的标点符号和分段\n5. 按语义逻辑重新组织段落\n\n请直接输出整理后的文本，不要加解释。"),
+    system_prompt: str = Form("你是一个专业的录音文本整理助手。请对以下课堂录音文本进行处理：\n1. 合并被音频切块切断的句子，确保语句完整通顺\n2. 修正ASR识别错误的词语\n3. 对专业术语进行准确的补充和规范化\n4. 恢复正确的标点符号和分段\n5. 按语义逻辑重新组织段落，输出清晰的文档格式\n6. 保留原文的语气和风格，不要过度改写\n7. 在末尾添加简短的内容概要\n直接输出结果，不要加任何解释、不要出现\"以下是对\"等AI相关表述。"),
     temperature: float = Form(0.3),
     max_chars: int = Form(50),
     pause_threshold: float = Form(0.3),
@@ -594,6 +707,7 @@ def transcribe_async(
     context: str = Form(""),
     max_chars: int = Form(50),
     pause_threshold: float = Form(0.3),
+    source: str = Form("upload"),
 ):
     """非阻塞上传 + 排队，立刻返回 file_id"""
     file_id = str(uuid.uuid4())[:8]
@@ -613,7 +727,7 @@ def transcribe_async(
         if not _is_processing:
             threading.Thread(target=_queue_next, daemon=True).start()
 
-    _update_progress(file_id, status="queued", filename=file.filename or "unknown")
+    _update_progress(file_id, status="queued", filename=file.filename or "unknown", source=source)
     return {"file_id": file_id, "position": pos, "status": "queued"}
 
 
@@ -640,21 +754,174 @@ def set_output_dir(path: str = Form(...)):
 @app.post("/save_result")
 def save_result(
     file_id: str = Form(...),
-    filename: str = Form("transcription.txt"),
+    filename: str = Form("transcription"),
 ):
-    """将转写结果保存到输出目录"""
+    """将转写结果保存到输出目录（.md 格式 + YAML frontmatter）"""
     if not os.path.isdir(_output_dir):
         raise HTTPException(status_code=400, detail="输出目录未配置")
+
+    # 从内存进度或磁盘读取完整数据
+    result_data = None
     with _progress_lock:
         p = _transcription_progress.get(file_id)
-    if not p or p.get("status") != "completed":
-        raise HTTPException(status_code=400, detail="任务未完成或不存在")
-    text = p.get("full_text", "")
+        if p and p.get("status") == "completed":
+            result_data = dict(p)
+
+    if not result_data:
+        result_path = RESULTS_DIR / f"{file_id}.json"
+        if result_path.exists():
+            try:
+                result_data = json.load(open(result_path, "r", encoding="utf-8"))
+            except Exception:
+                pass
+
+    if not result_data:
+        raise HTTPException(status_code=400, detail="没有转写文本")
+
+    text = result_data.get("full_text", "")
     if not text:
         raise HTTPException(status_code=400, detail="没有转写文本")
-    out_path = Path(_output_dir) / filename
-    out_path.write_text(text, encoding="utf-8")
+
+    # Clean filename: strip original extension (e.g. "lecture.mp4" → "lecture")
+    clean_name = Path(filename).stem
+
+    # Build frontmatter
+    completed_at = result_data.get("completed_at", time.time())
+    if isinstance(completed_at, (int, float)):
+        created = time.strftime("%Y-%m-%dT%H:%M:%S+08:00", time.localtime(completed_at))
+    else:
+        created = time.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+
+    frontmatter = f"""---
+title: {clean_name}
+source: ASR 语音转写
+author: ASR 系统
+published: {created}
+created: {created}
+description: {clean_name} 转写结果
+tags: [ASR, 语音识别, 转写]
+---
+
+"""
+
+    md_content = frontmatter + text
+    out_path = Path(_output_dir) / f"{clean_name}.md"
+    out_path.write_text(md_content, encoding="utf-8")
     return {"success": True, "path": str(out_path)}
+
+
+@app.post("/save_text")
+def save_text(
+    filename: str = Form(...),
+    content: str = Form(...),
+):
+    """将任意文本内容（ASS 字幕等）保存到输出目录"""
+    if not os.path.isdir(_output_dir):
+        raise HTTPException(status_code=400, detail="输出目录未配置")
+    clean_name = Path(filename).name
+    out_path = Path(_output_dir) / clean_name
+    out_path.write_text(content, encoding="utf-8")
+    return {"success": True, "path": str(out_path)}
+
+
+# ============ LLM 配置管理（AI Agent 可用）============
+LLM_CONFIG_PATH = BASE_DIR / "llm_config.json"
+
+def _load_llm_config():
+    if LLM_CONFIG_PATH.exists():
+        try:
+            return json.load(open(LLM_CONFIG_PATH, "r", encoding="utf-8"))
+        except Exception:
+            pass
+    return {"api_url": "", "api_key": "", "model_name": "", "system_prompt": "", "temperature": 0.3}
+
+
+@app.get("/llm_config")
+def get_llm_config():
+    """获取 LLM 配置（AI Agent 可调用，无需 Web UI）"""
+    return _load_llm_config()
+
+
+class LLMConfigBody(BaseModel):
+    api_url: str = ""
+    api_key: str = ""
+    model_name: str = ""
+    system_prompt: str = ""
+    temperature: float = 0.3
+
+
+@app.post("/llm_config")
+def set_llm_config(config: LLMConfigBody):
+    """保存 LLM 配置（AI Agent 可调用，无需 Web UI）"""
+    data = config.model_dump()
+    json.dump(data, open(LLM_CONFIG_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    return {"success": True}
+
+
+# ============ 持久化结果查询 ============
+@app.get("/results")
+def list_results():
+    """列出所有已持久化的转写结果"""
+    files = sorted(RESULTS_DIR.glob("*.json"))
+    results = []
+    for f in files:
+        if "_chunk_" in f.name:
+            continue
+        try:
+            data = json.load(open(f, "r", encoding="utf-8"))
+            results.append({
+                "id": data.get("file_id", f.stem),
+                "filename": data.get("filename", ""),
+                "duration_sec": data.get("duration_sec", 0),
+                "completed_at": data.get("completed_at", 0),
+                "text_length": len(data.get("full_text", "")),
+            })
+        except Exception:
+            pass
+    return {"results": results}
+
+
+@app.get("/results/{file_id}")
+def get_result_file(file_id: str):
+    """获取单个持久化结果"""
+    path = RESULTS_DIR / f"{file_id}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="结果不存在")
+    return json.load(open(path, "r", encoding="utf-8"))
+
+
+# ============ 文件下载（供局域网其他机器使用）============
+
+@app.get("/download/{filename:path}")
+def download_file(filename: str):
+    """从输出目录下载文件（支持 .md、.ass、.txt 等）"""
+    # Security: prevent path traversal
+    clean = Path(filename).name
+    path = Path(_output_dir) / clean
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    from fastapi.responses import FileResponse
+    return FileResponse(str(path), media_type="text/plain; charset=utf-8",
+                        filename=clean, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{clean}"})
+
+
+@app.get("/files")
+def list_files():
+    """列出输出目录中的所有文件"""
+    output_path = Path(_output_dir)
+    if not output_path.exists():
+        return {"files": []}
+    files = []
+    for f in sorted(output_path.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+        if f.is_file():
+            stat = f.stat()
+            files.append({
+                "name": f.name,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+                "url": f"/download/{f.name}",
+            })
+    return {"files": files, "output_dir": _output_dir}
 
 
 # ============ 进度自动清理 ============
@@ -691,12 +958,23 @@ if __name__ == "__main__":
     print(f"    POST /transcribe       - ASR 转写（阻塞）")
     print(f"    POST /transcribe_async - ASR 转写（非阻塞+排队）")
     print(f"    POST /transcribe_ass   - ASS 字幕下载")
-    print(f"    POST /transcribe_url   - URL 转写")
-    print(f"    POST /refine           - LLM 润色文本")
+    print(f"    POST /refine           - LLM 润色文本（非流式）")
+    print(f"    POST /refine_stream    - LLM 润色文本（流式 SSE）")
     print(f"    POST /full_pipeline    - 完整流水线（ASR + LLM）")
     print(f"    GET  /health           - 健康检查")
     print(f"    GET  /guide            - SPA 指南")
     print(f"    GET  /config           - SPA 配置")
-    print(f"    GET  /output_dir       - 输出目录管理")
-    print(f"    POST /save_result      - 保存结果到输出目录\n")
+    print(f"    GET  /output_dir       - 获取输出目录")
+    print(f"    POST /output_dir       - 设置输出目录")
+    print(f"    POST /save_result      - 保存转写结果到输出目录（.md）")
+    print(f"    POST /save_text        - 保存任意文本到输出目录")
+    print("    GET  /transcribe_status/{file_id} - 查看转写进度")
+    print("    GET  /transcribe_stream/{file_id} - SSE 流式转写进度")
+    print(f"    GET  /transcribe_list   - 列出进行中任务")
+    print(f"    GET  /results           - 列出持久化结果")
+    print(f"    GET  /results/{{file_id}}   - 获取单个结果（含 full_text）")
+    print(f"    GET  /files             - 列出输出目录文件（LAN 访问）")
+    print(f"    GET  /download/{{filename}} - 下载输出目录文件（LAN 访问）")
+    print(f"    GET  /llm_config       - 获取 LLM 配置（AI Agent）")
+    print(f"    POST /llm_config       - 设置 LLM 配置（AI Agent）\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -33,12 +33,24 @@ taskkill //F //PID $(netstat -ano | grep ":8000.*LISTEN" | awk '{print $5}')
 
 ## API 端点速查
 
-- `GET /guide` — AI Agent 接入指南（浏览器打开，含 curl 示例）
-- `POST /transcribe` — 上传文件转写（multipart/form-data, field: file）
-- `GET /transcribe_list` — 列出所有任务
+- `GET /health` — 健康检查
+- `POST /transcribe` — 上传文件转写（阻塞）
+- `POST /transcribe_async` — 上传文件转写（非阻塞+排队）
+- `POST /transcribe_ass` — 转写 + 生成 ASS 字幕
 - `GET /transcribe_status/{file_id}` — 查看进度（含已转出的文字）
-- `POST /refine` — LLM 润色文本（需要 api_key）
-- `POST /full_pipeline` — 完整流水线（传 api_key 启用 LLM 润色）
+- `GET /transcribe_stream/{file_id}` — SSE 流式推送转写进度
+- `GET /transcribe_list` — 列出所有活跃任务
+- `POST /refine` — LLM 润色文本（非流式）
+- `POST /refine_stream` — LLM 润色文本（流式 SSE）
+- `POST /full_pipeline` — ASR + LLM 完整流水线
+- `GET /output_dir` / `POST /output_dir` — 获取/设置输出目录
+- `POST /save_result` — 保存转写结果到输出目录（.md+frontmatter）
+- `POST /save_text` — 保存任意文本到输出目录
+- `GET /results` — 列出已持久化的结果
+- `GET /results/{file_id}` — 获取单个结果完整 JSON
+- `GET /files` — 列出输出目录所有文件
+- `GET /download/{filename}` — 下载输出目录中的文件
+- `GET /llm_config` / `POST /llm_config` — 获取/设置 LLM 配置
 
 ## LLM 润色配置
 
@@ -117,3 +129,69 @@ cd 项目根目录 && python test_pipeline.py
 ## Skill 文件
 
 项目自带一个 `/asr-api` skill，位于 `.claude/skills/asr-api.md`，包含完整的 AI Agent 调用指南。当其他 AI agent 需要调用本服务时，可以告诉它查看这个文件。
+
+# CLAUDE.md
+
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
+
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+
+## 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+---
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

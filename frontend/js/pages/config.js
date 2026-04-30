@@ -58,7 +58,7 @@ export function render() {
         </div>
         <div class="form-group">
           <label>系统提示词</label>
-          <textarea class="form-input" id="systemPrompt" rows="4">${saved.system_prompt || '你是一个专业的文档整理助手。请对以下课堂录音文本进行处理：\n1. 合并被切断的句子\n2. 修正ASR识别错误\n3. 补充专业术语的准确表述\n4. 恢复正确的标点符号\n5. 按语义分段，输出清晰的文档格式\n直接输出结果，不要多余的解释。'}</textarea>
+          <textarea class="form-input" id="systemPrompt" rows="4"></textarea>
         </div>
         <div class="form-group">
           <label>Temperature: <span id="tempValue">${saved.temperature || 0.3}</span></label>
@@ -87,6 +87,19 @@ export function render() {
     </div>
 
     <div id="testResult" class="hidden" style="padding:12px;border-radius:var(--radius-sm);margin-bottom:16px"></div>
+
+    <div class="card">
+      <h2>背景设置</h2>
+      <div class="form-group">
+        <label>背景图片 URL（可选）</label>
+        <input type="text" class="form-input" id="bgImageInput" value="${localStorage.getItem('asr_bg_image') || ''}" placeholder="https://example.com/wallpaper.jpg">
+        <div class="form-hint">设置后页面背景将使用此图片，半透明遮罩保证内容可读。留空恢复默认。</div>
+      </div>
+      <div class="btn-group">
+        <button type="button" class="btn btn-secondary" id="setBgBtn">应用背景</button>
+        <button type="button" class="btn btn-ghost" id="clearBgBtn">清除背景</button>
+      </div>
+    </div>
   `;
 }
 
@@ -106,6 +119,32 @@ export function init() {
   document.getElementById('saveTestBtn').addEventListener('click', saveAndTest);
   document.getElementById('saveBtn').addEventListener('click', () => { saveConfig(); toast('配置已保存', 'success'); });
   document.getElementById('clearBtn').addEventListener('click', clearPreset);
+
+  // Init textarea with active preset's system_prompt
+  const activePreset = getActivePreset();
+  const saved = loadPresetConfig(activePreset);
+  document.getElementById('systemPrompt').value = saved.system_prompt || '';
+  document.getElementById('tempValue').textContent = saved.temperature || 0.3;
+
+  // Background image
+  document.getElementById('setBgBtn').addEventListener('click', () => {
+    const url = document.getElementById('bgImageInput').value.trim();
+    if (url) {
+      localStorage.setItem('asr_bg_image', url);
+      document.body.style.setProperty('--bg-image', `url("${url.replace(/"/g, '\\"')}")`);
+      toast('背景已应用', 'success');
+    } else {
+      localStorage.removeItem('asr_bg_image');
+      document.body.style.setProperty('--bg-image', 'none');
+      toast('已清除背景', 'info');
+    }
+  });
+  document.getElementById('clearBgBtn').addEventListener('click', () => {
+    document.getElementById('bgImageInput').value = '';
+    localStorage.removeItem('asr_bg_image');
+    document.body.style.setProperty('--bg-image', 'none');
+    toast('背景已清除', 'info');
+  });
 
   updateStatus();
 }

@@ -17,6 +17,10 @@ export function render() {
 
 export function init() {
   renderResults();
+
+  // 从服务端拉取持久化结果，合并到本地
+  mergeServerResults();
+
   document.getElementById('clearResultsBtn').addEventListener('click', () => {
     if (confirm('确定清空所有转写结果？')) {
       localStorage.setItem('asr_results', '[]');
@@ -24,6 +28,45 @@ export function init() {
       toast('已清空', 'info');
     }
   });
+}
+
+async function mergeServerResults() {
+  try {
+    const server = await API.listResults();
+    const local = JSON.parse(localStorage.getItem('asr_results') || '[]');
+    const localIds = new Set(local.map(r => r.id));
+
+    let added = 0;
+    for (const item of server.results || []) {
+      if (!localIds.has(item.id) && item.text_length > 0) {
+        // Fetch full detail
+        try {
+          const detail = await API.getResult(item.id);
+          local.push({
+            id: detail.file_id || item.id,
+            filename: detail.filename || item.id,
+            date: new Date((detail.completed_at || 0) * 1000).toISOString(),
+            duration_sec: detail.duration_sec || 0,
+            language: detail.language || '',
+            text: detail.full_text || '',
+            segments: detail.segments || [],
+            words: [],
+          });
+          added++;
+        } catch {}
+      }
+    }
+    if (added > 0) {
+      // Sort by date descending
+      local.sort((a, b) => new Date(b.date) - new Date(a.date));
+      if (local.length > 20) local.length = 20;
+      localStorage.setItem('asr_results', JSON.stringify(local));
+      renderResults();
+      toast(`已恢复 ${added} 条服务端结果`, 'success');
+    }
+  } catch {
+    // Silent — server might not have results endpoint
+  }
 }
 
 function renderResults() {
@@ -54,7 +97,7 @@ function renderResults() {
       <div class="text-sm text-dim mt-8" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(preview)}</div>
       <div class="row-actions mt-8" id="actions_${idx}" hidden>
         <button class="btn btn-primary btn-sm" data-action="copy">复制全文</button>
-        <button class="btn btn-secondary btn-sm" data-action="download">下载 TXT</button>
+        <button class="btn btn-secondary btn-sm" data-action="download">下载 .md</button>
         <button class="btn btn-secondary btn-sm" data-action="ass">下载 ASS</button>
         <button class="btn btn-secondary btn-sm" data-action="refine">LLM 润色</button>
         <button class="btn btn-secondary btn-sm" data-action="save">保存到目录</button>
@@ -157,7 +200,9 @@ function fmtAssTime(sec) {
 
 async function saveToDir(result) {
   try {
-    const r = await API.saveResult(result.id, (result.filename || 'transcription') + '.txt');
+    // Strip original extension, let server add .md
+    const cleanName = (result.filename || 'transcription').replace(/[\\/:*?"<>|]/g, '_');
+    const r = await API.saveResult(result.id, cleanName);
     toast('已保存到: ' + r.path, 'success');
   } catch (e) {
     toast('保存失败: ' + e.message, 'error');

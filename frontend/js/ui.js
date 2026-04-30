@@ -67,13 +67,13 @@ export function statusBadge(status) {
     error: 'badge-error',
   };
   const labels = {
-    queued: '排队中',
-    uploading: '上传中',
-    downloaded: '已下载',
-    transcribing: '转写中',
-    merging: '合并中',
-    completed: '已完成',
-    error: '出错',
+    queued: '排队中 ( - ω - )',
+    uploading: '上传中 ( ˙˘˙ )',
+    downloaded: '已下载 (･ω･)b',
+    transcribing: '转写中 (≧▽≦)/',
+    merging: '合并中 (๑•̀ㅂ•́)و',
+    completed: '好啦！(≧∇≦)ﾉ',
+    error: '出错 (╥﹏╥)',
   };
   return `<span class="badge ${map[status] || 'badge-queued'}">${labels[status] || status}</span>`;
 }

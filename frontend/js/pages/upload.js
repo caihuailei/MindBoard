@@ -3,9 +3,12 @@ import { API } from '../api.js';
 import { toast, statusBadge, formatDuration, copyToClipboard, downloadText } from '../ui.js';
 import { navigate } from '../router.js';
 
-let pollTimers = {};
+let streamControllers = {};  // fileId -> EventSource
 let activeFileId = null;
 let currentPollingId = null;
+let savedFileIds = new Set(JSON.parse(localStorage.getItem('asr_saved_ids') || '[]'));
+let liveWords = [];  // accumulate words across SSE events (server only sends new words)
+let uploadedFiles = [];  // track uploaded file metadata {rowId, fileId, filename, fileSize}
 
 export function render() {
   return `
@@ -20,10 +23,10 @@ export function render() {
 
     <div id="queueContainer"></div>
 
-    <div id="liveContainer" class="hidden">
+    <div id="liveContainer">
       <div class="card">
         <h2>实时转写 <span id="liveStatus" class="text-dim text-sm"></span></h2>
-        <div class="transcript-body" id="transcriptBody"></div>
+        <div class="transcript-body" id="transcriptBody"><span class="text-dim">等待上传文件后开始转写...</span></div>
         <div class="btn-group" id="liveActions" hidden>
           <button class="btn btn-primary btn-sm" id="copyLiveBtn">复制全文</button>
           <button class="btn btn-secondary btn-sm" id="downloadLiveBtn">下载 TXT</button>
@@ -96,6 +99,9 @@ export function init() {
   // Restore active tasks on re-entry
   restoreActiveTasks();
 
+  // Recover any server-persisted results not yet in localStorage
+  recoverServerResults();
+
   // Live action buttons
   document.getElementById('copyLiveBtn')?.addEventListener('click', () => {
     const text = document.getElementById('transcriptBody')?.textContent || '';
@@ -119,9 +125,12 @@ export function init() {
   });
 
   return () => {
-    // Cleanup timers
-    Object.values(pollTimers).forEach(t => clearInterval(t));
-    pollTimers = {};
+    // Save state before leaving
+    saveUploadState();
+    // Cleanup EventSource connections
+    Object.values(streamControllers).forEach(c => c.close());
+    streamControllers = {};
+    liveWords = [];
   };
 }
 
@@ -131,6 +140,16 @@ function savePrefs() {
     maxChars: parseInt(document.getElementById('defaultMaxChars').value) || 50,
     pauseThreshold: parseFloat(document.getElementById('defaultPause').value) || 0.3,
   }));
+}
+
+function saveUploadState() {
+  sessionStorage.setItem('upload_files', JSON.stringify(uploadedFiles));
+}
+
+function loadUploadState() {
+  try {
+    return JSON.parse(sessionStorage.getItem('upload_files') || '[]');
+  } catch { return []; }
 }
 
 async function loadOutputDir() {
@@ -179,7 +198,11 @@ async function handleFiles(files) {
     container.appendChild(row);
 
     // Remove button
-    row.querySelector('.remove-btn').addEventListener('click', () => row.remove());
+    row.querySelector('.remove-btn').addEventListener('click', () => {
+      row.remove();
+      uploadedFiles = uploadedFiles.filter(f => f.rowId !== id);
+      saveUploadState();
+    });
 
     // Upload
     try {
@@ -190,11 +213,16 @@ async function handleFiles(files) {
         language: lang,
         maxChars,
         pauseThreshold: pause,
+        source: 'upload',
       });
 
       row.querySelector('.meta').textContent += ' · 排队中';
       row.querySelector(`#${id}_status`).innerHTML = statusBadge('queued');
       row.dataset.fileId = result.file_id;
+
+      // Track for state persistence
+      uploadedFiles.push({ rowId: id, fileId: result.file_id, filename: file.name, fileSize: file.size });
+      saveUploadState();
 
       // Start polling status
       startPolling(result.file_id, row);
@@ -215,59 +243,80 @@ function startPolling(fileId, row) {
   const statusEl = document.getElementById(row.id + '_status');
   const metaEl = row.querySelector('.meta');
 
-  if (pollTimers[fileId]) clearInterval(pollTimers[fileId]);
+  // Close any existing EventSource for this fileId
+  if (streamControllers[fileId]) {
+    streamControllers[fileId].close();
+  }
 
-  pollTimers[fileId] = setInterval(async () => {
-    try {
-      const data = await API.transcribeStatus(fileId);
-      if (!data || data.status === 'not_found') {
-        clearInterval(pollTimers[fileId]);
-        delete pollTimers[fileId];
-        return;
-      }
+  // Reset word accumulator for this fileId
+  liveWords = [];
 
+  const es = streamControllers[fileId] = API.createTranscribeEventSource(fileId,
+    // onData — each SSE event
+    (data) => {
       statusEl.innerHTML = statusBadge(data.status);
 
-      if (data.status === 'transcribing' || data.status === 'merging') {
+      const liveContainer = document.getElementById('liveContainer');
+      const liveStatus = document.getElementById('liveStatus');
+
+      if (data.status === 'queued') {
+        liveStatus.textContent = '排队中 ( - ω - )';
+      } else if (data.status === 'transcribing' || data.status === 'merging') {
         progressBar.classList.remove('hidden');
-        const pct = data.total_duration > 0
-          ? Math.min(95, Math.round(data.chunks_done * 100 / Math.max(data.chunks_done, 1)))
-          : 50;
-        progressBar.querySelector('.progress-fill').style.width = pct + '%';
+        progressBar.querySelector('.progress-fill').style.width = '';
+        progressBar.querySelector('.progress-fill').classList.add('indeterminate');
         metaEl.textContent = `第 ${data.chunks_done} 块 · ${formatDuration(data.total_duration)}`;
       }
 
       if (data.status === 'completed') {
-        clearInterval(pollTimers[fileId]);
-        delete pollTimers[fileId];
+        delete streamControllers[fileId];
+        es.close();
+        progressBar.querySelector('.progress-fill').classList.remove('indeterminate');
         progressBar.classList.add('hidden');
         progressBar.querySelector('.progress-fill').style.width = '100%';
         metaEl.textContent = `${formatDuration(data.duration_sec)} · ${(data.full_text || '').length} 字`;
 
-        // Save to localStorage results
         saveResult(data, row);
+        autoSaveToDir(data);
 
-        // Show live transcript
         if (data.full_text) showLiveTranscript(data);
         toast('转写完成: ' + (row.querySelector('.name')?.textContent || fileId), 'success');
+
+        // Save completed transcription text for page-switch persistence
+        sessionStorage.setItem('upload_last_transcript', JSON.stringify({
+          fileId,
+          filename: row.querySelector('.name')?.textContent || fileId,
+          text: data.full_text,
+          segments: data.segments,
+          duration_sec: data.duration_sec,
+        }));
       }
 
       if (data.status === 'error') {
-        clearInterval(pollTimers[fileId]);
-        delete pollTimers[fileId];
+        delete streamControllers[fileId];
+        es.close();
         metaEl.textContent = '转写出错';
         toast('转写出错: ' + fileId, 'error');
       }
 
-      // Update live transcript during transcription
-      if (data.status === 'transcribing' && data.words && data.words.length > 0) {
-        updateLiveWords(data.words, data);
+      if (data.status === 'not_found') {
+        delete streamControllers[fileId];
+        es.close();
+        metaEl.textContent = '任务不存在';
+        toast('任务不存在: ' + fileId, 'error');
       }
 
-    } catch (e) {
-      // Poll failed, will retry next interval
+      // Accumulate words — server only sends new words (len-diff based), frontend accumulates
+      if (data.status === 'transcribing' && data.words && data.words.length > 0) {
+        liveWords.push(...data.words);
+        renderLiveWords(liveWords, data);
+      }
+    },
+    // onDone — stream ended, check current status if not yet completed
+    () => {
+      delete streamControllers[fileId];
     }
-  }, 1000);
+  );
 }
 
 function saveResult(data, row) {
@@ -286,16 +335,37 @@ function saveResult(data, row) {
   // Keep max 20 results
   if (results.length > 20) results.length = 20;
   localStorage.setItem('asr_results', JSON.stringify(results));
+
+  // Track saved IDs to avoid duplicates
+  savedFileIds.add(data.file_id);
+  localStorage.setItem('asr_saved_ids', JSON.stringify([...savedFileIds]));
 }
 
-// 回到页面时恢复活跃任务
+async function autoSaveToDir(data) {
+  try {
+    const dir = await API.getOutputDir();
+    if (dir.exists) {
+      // Strip original extension (e.g. "lecture.mp4" → "lecture")
+      const raw = data.filename || data.file_id || 'transcription';
+      const cleanName = raw.replace(/[\\/:*?"<>|]/g, '_');
+      await API.saveResult(data.file_id, cleanName);
+    }
+  } catch {
+    // Silent — output dir not configured or save failed
+  }
+}
+
+// 回到页面时恢复活跃任务 + 保存未入库的已完成任务
 async function restoreActiveTasks() {
   try {
     const list = await API.transcribeList();
     const active = list.active || {};
     for (const [fid, info] of Object.entries(active)) {
+      // Skip ASS-generated tasks
+      if (info.source === 'ass') continue;
+
+      // 恢复进行中的任务
       if (info.status === 'transcribing' || info.status === 'queued' || info.status === 'merging') {
-        // Create a row for the active task
         const container = document.getElementById('queueContainer');
         const row = document.createElement('div');
         row.className = 'queue-item';
@@ -304,12 +374,38 @@ async function restoreActiveTasks() {
           <div class="info">
             <div class="name text-mono">${fid}</div>
             <div class="meta">第 ${info.chunks_done || 0} 块 · ${formatDuration(info.total_duration || 0)}</div>
-            <div class="progress-bar" id="${fid}_restore_progress"><div class="progress-fill" style="width:${info.total_duration > 0 ? '50' : '0'}%"></div></div>
+            <div class="progress-bar" id="${row.id}_progress"><div class="progress-fill indeterminate" style="width:30%"></div></div>
           </div>
           <div class="status">${statusBadge(info.status)}</div>
         `;
         container.appendChild(row);
+
+        // Reset word accumulator for restored task
+        liveWords = [];
+
+        // 先拉一次当前状态，填充已有词
+        try {
+          const current = await API.transcribeStatus(fid);
+          if (current?.status === 'transcribing' && current.words?.length > 0) {
+            liveWords.push(...current.words);
+            renderLiveWords(liveWords, current);
+          }
+        } catch {}
+
+        // 再启动 EventSource 流式接收后续更新
         startPolling(fid, row);
+      }
+
+      // 保存已完成的但尚未入库的任务（用户离开页面期间完成的）
+      if (info.status === 'completed' && !savedFileIds.has(fid)) {
+        const data = await API.transcribeStatus(fid);
+        if (data?.full_text) {
+          // Add filename if missing
+          if (!data.filename) data.filename = fid;
+          saveResult(data, null);
+          autoSaveToDir(data);
+          toast('已恢复完成的任务: ' + (data.filename || fid), 'success');
+        }
       }
     }
   } catch (e) {
@@ -317,11 +413,7 @@ async function restoreActiveTasks() {
   }
 }
 
-let lastWordCount = 0;
-
 function showLiveTranscript(data) {
-  const container = document.getElementById('liveContainer');
-  container.classList.remove('hidden');
   document.getElementById('liveActions').hidden = false;
 
   const body = document.getElementById('transcriptBody');
@@ -339,10 +431,7 @@ function showLiveTranscript(data) {
   }
 }
 
-function updateLiveWords(words, data) {
-  const container = document.getElementById('liveContainer');
-  if (container.classList.contains('hidden')) container.classList.remove('hidden');
-
+function renderLiveWords(words, data) {
   const body = document.getElementById('transcriptBody');
 
   // Show segments when merging
@@ -350,22 +439,55 @@ function updateLiveWords(words, data) {
     return;
   }
 
-  // Show word stream
-  if (words.length > lastWordCount) {
-    const newWords = words.slice(lastWordCount);
-    newWords.forEach(w => {
-      const span = document.createElement('span');
-      span.className = 'word new';
-      span.textContent = w.word;
-      body.appendChild(span);
-    });
-    // Auto-scroll
-    body.scrollTop = body.scrollHeight;
-    lastWordCount = words.length;
-  }
+  // Re-render all accumulated words
+  body.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  words.forEach(w => {
+    const span = document.createElement('span');
+    span.className = 'word';
+    span.textContent = w.word;
+    frag.appendChild(span);
+  });
+  body.appendChild(frag);
+  body.scrollTop = body.scrollHeight;
 
   document.getElementById('liveStatus').textContent =
-    `· ${data.chunks_done || 0} 块 · ${formatDuration(data.total_duration || 0)}`;
+    `· ${data.chunks_done || 0} 块 · ${formatDuration(data.total_duration || 0)} · ${words.length} 词`;
+}
+
+async function recoverServerResults() {
+  try {
+    const server = await API.listResults();
+    const local = JSON.parse(localStorage.getItem('asr_results') || '[]');
+    const localIds = new Set(local.map(r => r.id));
+
+    let added = 0;
+    for (const item of server.results || []) {
+      if (!localIds.has(item.id) && item.text_length > 0) {
+        const detail = await API.getResult(item.id);
+        local.push({
+          id: detail.file_id || item.id,
+          filename: detail.filename || item.id,
+          date: new Date((detail.completed_at || 0) * 1000).toISOString(),
+          duration_sec: detail.duration_sec || 0,
+          language: detail.language || '',
+          text: detail.full_text || '',
+          segments: detail.segments || [],
+          words: [],
+        });
+        savedFileIds.add(item.id);
+        added++;
+      }
+    }
+    if (added > 0) {
+      local.sort((a, b) => new Date(b.date) - new Date(a.date));
+      if (local.length > 20) local.length = 20;
+      localStorage.setItem('asr_results', JSON.stringify(local));
+      localStorage.setItem('asr_saved_ids', JSON.stringify([...savedFileIds]));
+    }
+  } catch {
+    // Silent
+  }
 }
 
 function escapeHtml(s) {
