@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 模型文件太大，请自行下载
+models/
+
+# 参考代码（非本项目代码）
+reference/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# 临时文件
+*.log
+*.tmp
