@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASR API 控制台</title>
+<link rel="stylesheet" href="/assets/css/style.css">
+</head>
+<body>
+<nav class="navbar" id="navbar">
+  <div class="nav-inner">
+    <a href="#/upload" class="logo">ASR API</a>
+    <div class="nav-links" id="navLinks">
+      <a href="#/upload" class="nav-item active">上传</a>
+      <a href="#/results" class="nav-item">结果</a>
+      <a href="#/ass" class="nav-item">ASS</a>
+      <a href="#/refine" class="nav-item">润色</a>
+      <a href="#/config" class="nav-item">配置</a>
+      <a href="#/health" class="nav-item">状态</a>
+      <a href="#/guide" class="nav-item">指南</a>
+    </div>
+    <div class="nav-right">
+      <span class="health-dot" id="healthDot" title="服务器状态"></span>
+      <button class="hamburger" id="hamburger" aria-label="菜单">&#9776;</button>
+    </div>
+  </div>
+</nav>
+<main id="app" class="container"></main>
+<div id="toast-container"></div>
+<script type="module" src="/assets/js/app.js"></script>
+</body>
+</html>

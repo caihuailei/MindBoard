@@ -2,7 +2,7 @@
 Qwen3-ASR API Server v2
 参考 Transby2 的 merge 逻辑 + LLM 后处理
 """
-import os, sys, json, uuid, tempfile, re, time, subprocess
+import os, sys, json, uuid, tempfile, re, time, subprocess, asyncio
 from pathlib import Path
 from typing import Optional, List
 
@@ -11,8 +11,10 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import torch
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
 from qwen_asr import Qwen3ASRModel
 
 # ============ 配置 ============
@@ -23,7 +25,20 @@ DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 TEMP_DIR = Path(tempfile.gettempdir()) / "asr_api"
 TEMP_DIR.mkdir(exist_ok=True)
 
-app = FastAPI(title="ASR API 服务", version="2.0")
+@asynccontextmanager
+async def _lifespan(app):
+    """启动时创建清理任务、输出目录，关闭时清理"""
+    output_dir = BASE_DIR / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cleanup_task = asyncio.create_task(_cleanup_old_progress())
+    yield
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+
+app = FastAPI(title="ASR API 服务", version="2.0", lifespan=_lifespan)
 model: Optional[Qwen3ASRModel] = None
 
 # ============ 转写进度追踪 ============
@@ -37,6 +52,7 @@ def _update_progress(file_id: str, **kwargs):
         if file_id not in _transcription_progress:
             _transcription_progress[file_id] = {"words": [], "chunks_done": 0, "total_duration": 0.0}
         _transcription_progress[file_id].update(kwargs)
+        _transcription_progress[file_id]["_updated_at"] = time.time()
 
 # ============ Transby2 的自适应合并逻辑（精简版）============
 SPLIT_PUNCTUATION = ['。', '!', '?', '…', ' ', '、', '，', '？', '！', '.', ',', ';', ':']
@@ -188,433 +204,30 @@ async def health():
     }
 
 
-# ============ AI Agent / 开发者指南 ============
-AGENT_GUIDE_HTML = r"""
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><title>ASR API — AI Agent 接入指南</title>
-<meta name="description" content="ASR API 接入文档 — 面向 AI Agent 和开发者的完整指南">
-<style>
-body{font-family:'Segoe UI',sans-serif;max-width:960px;margin:40px auto;padding:20px;line-height:1.7;background:#1a1a2e;color:#e0e0e0}
-h1{color:#00d2ff;border-bottom:2px solid #00d2ff;padding-bottom:8px}
-h2{color:#ffd700;margin-top:32px}
-h3{color:#7ec8e3}
-code{background:#2d2d4e;padding:2px 6px;border-radius:3px;font-size:.92em}
-pre{background:#2d2d4e;padding:16px;border-radius:6px;overflow-x:auto;border-left:3px solid #00d2ff}
-pre code{background:none;padding:0}
-.alert{background:#3d2e2e;border-left:4px solid #ff6b6b;padding:12px 16px;margin:16px 0;border-radius:4px}
-.info{background:#2e3d3e;border-left:4px solid #00d2ff;padding:12px 16px;margin:16px 0;border-radius:4px}
-.endpoint{background:#2d2d4e;padding:8px 16px;border-radius:20px;display:inline-block;font-family:monospace;margin:4px 0}
-table{border-collapse:collapse;width:100%;margin:12px 0}
-th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #3d3d5e}
-th{background:#2d2d4e;color:#ffd700}
-</style></head>
-<body>
-<h1>ASR API — AI Agent 接入指南</h1>
-<p>这是一份面向 <strong>AI Agent</strong> 和开发者的接入文档。服务器运行在 Windows 11 + RTX 5060 环境下，提供课堂录音/视频的 ASR 转写服务。</p>
-
-<div class="alert">
-<strong>服务器地址</strong><br>
-<code>http://{host}:8000</code><br>
-当前设备 IP（由服务器动态获取），如果 agent 在同一局域网，直接用此地址访问。
-</div>
-
-<div style="margin-bottom:32px;display:flex;gap:12px">
-<a href="/config" style="display:inline-block;padding:10px 20px;background:#00d2ff;color:#1a1a2e;border-radius:6px;text-decoration:none;font-weight:600">配置 LLM</a>
-<a href="/openapi.json" style="display:inline-block;padding:10px 20px;border:1px solid #00d2ff;color:#00d2ff;border-radius:6px;text-decoration:none">OpenAPI 规范</a>
-</div>
-
-<h2>一、如何上传视频/音频</h2>
-<p>有两种方式将文件传给本服务：</p>
-
-<h3>方式 A：直接上传（推荐）</h3>
-<p>用 HTTP multipart/form-data 上传文件：</p>
-<pre><code>curl -X POST http://{host}:8000/transcribe \
-  -F "file=@/path/to/your/video.mp4" \
-  -F "language=Chinese" \
-  -F "max_chars=50" \
-  -F "pause_threshold=0.3" \
-  --max-time 3600 \
-  -o result.json</code></pre>
-<p>支持格式：<code>.mp4 .avi .mkv .mov .wmv .webm .ts .wav .mp3 .m4a</code> 等。</p>
-
-<h3>方式 B：通过 URL 下载（无需上传文件）</h3>
-<p>如果文件已经在某个 HTTP/HTTPS 地址上，直接传链接即可：</p>
-<pre><code>curl -X POST http://{host}:8000/transcribe_url \
-  -F "url=https://example.com/lecture.mp4" \
-  -F "language=Chinese"</code></pre>
-<p>服务器会自行下载到本地再处理。</p>
-
-<h2>二、API 端点列表</h2>
-
-<table>
-<tr><th>端点</th><th>方法</th><th>说明</th></tr>
-<tr><td><code>/health</code></td><td>GET</td><td>健康检查</td></tr>
-<tr><td><code>/transcribe</code></td><td>POST</td><td>上传文件并转写</td></tr>
-<tr><td><code>/transcribe_url</code></td><td>POST</td><td>传 URL 转写</td></tr>
-<tr><td><code>/transcribe_status/{file_id}</code></td><td>GET</td><td>查看转写进度</td></tr>
-<tr><td><code>/transcribe_list</code></td><td>GET</td><td>列出所有进行中的任务</td></tr>
-<tr><td><code>/transcribe_ass</code></td><td>POST</td><td>转写并下载 ASS 字幕</td></tr>
-<tr><td><code>/refine</code></td><td>POST</td><td>LLM 润色文本</td></tr>
-<tr><td><code>/full_pipeline</code></td><td>POST</td><td>ASR + LLM 完整流水线</td></tr>
-<tr><td><code>/openapi.json</code></td><td>GET</td><td>OpenAPI 规范（AI 自动发现）</td></tr>
-</table>
-
-<h2>三、AI Agent 最佳流程</h2>
-
-<div class="info"><strong>推荐流程：</strong>作为 AI agent，建议按以下步骤操作：</div>
-
-<h3>Step 1 — 获取文件</h3>
-<p>如果你能直接拿到文件：</p>
-<ul>
-<li>用 <code>/transcribe</code> 上传（multipart/form-data）</li>
-<li>用 <code>/transcribe_url</code> 传 URL（适合文件已在网上的情况）</li>
-</ul>
-
-<h3>Step 2 — 轮询进度</h3>
-<p>转写返回的 <code>file_id</code> 可以用来查进度：</p>
-<pre><code># 获取所有进行中的任务
-curl http://{host}:8000/transcribe_list
-
-# 查看具体任务的进度（含已转写出的文字片段）
-curl http://{host}:8000/transcribe_status/{{file_id}}</code></pre>
-<p>返回示例：</p>
-<pre><code>{
-  "file_id": "a1b2c3d4",
-  "status": "transcribing",       // uploading → transcribing → merging → completed
-  "words": [{"start":0.0, "end":0.5, "word":"你好"}],
-  "chunks_done": 5,
-  "total_duration": 180.5
-}</code></pre>
-
-<h3>Step 3 — 获取结果</h3>
-<p>转写完成后，<code>/transcribe</code> 会直接返回完整结果：</p>
-<pre><code>{
-  "success": true,
-  "file_id": "a1b2c3d4",
-  "text": "完整转写文本……",
-  "language": "Chinese",
-  "duration_sec": 10583.3,
-  "segments": [
-    {"start": 0.0, "end": 5.2, "text": "大家好今天我们来讲网络安全"},
-    ...
-  ],
-  "words": [...]      // 每个词的详细时间戳
-}</code></pre>
-
-<h3>Step 4 — (可选) LLM 润色</h3>
-<p>提供三种方式，任选其一：</p>
-
-<p><strong>方式 A：DeepSeek API（推荐，最快）</strong></p>
-<pre><code>curl -X POST http://{host}:8000/refine \
-  -F "text=需要润色的文本..." \
-  -F "api_key=sk-你的deepseek密钥" \
-  -F "api_url=https://api.deepseek.com" \
-  -F "model_name=deepseek-chat"</code></pre>
-<p>注册获取 Key：<a href="https://platform.deepseek.com" style="color:#00d2ff">platform.deepseek.com</a>，新用户送额度。</p>
-
-<p><strong>方式 B：魔搭 ModelScope（推荐 GLM-5）</strong></p>
-<pre><code>curl -X POST http://{host}:8000/refine \
-  -F "text=需要润色的文本..." \
-  -F "api_key=ms-你的魔搭token" \
-  -F "api_url=https://api-inference.modelscope.cn/v1" \
-  -F "model_name=ZhipuAI/GLM-5"</code></pre>
-<p>Token 获取：<a href="https://modelscope.cn" style="color:#00d2ff">modelscope.cn</a> → 个人中心 → 创建 API Token</p>
-
-<p><strong>方式 C：Ollama 本地免费模型</strong></p>
-<pre><code># 1. 安装 Ollama（https://ollama.com）
-# 2. 拉取模型（终端执行）：
-#    ollama pull qwen2.5:7b
-# 3. 调用：
-curl -X POST http://{host}:8000/refine \
-  -F "text=需要润色的文本..." \
-  -F "api_key=ollama" \
-  -F "api_url=http://localhost:11434/v1" \
-  -F "model_name=qwen2.5:7b"</code></pre>
-
-<p><strong>方式 C：LM Studio（图形化）</strong></p>
-<pre><code># 1. 安装 LM Studio（https://lmstudio.ai）
-# 2. 下载模型（如 Qwen2.5-7B-GGUF）
-# 3. 开启 Local Server（设置 → OpenAI API）
-# 4. 调用：
-curl -X POST http://{host}:8000/refine \
-  -F "text=需要润色的文本..." \
-  -F "api_key=not-needed" \
-  -F "api_url=http://localhost:1234/v1" \
-  -F "model_name=你加载的模型名"</code></pre>
-
-<p><strong>完整流水线一步到位：</strong></p>
-<pre><code>curl -X POST http://{host}:8000/full_pipeline \
-  -F "file=@lecture.mp4" \
-  -F "enable_llm=true" \
-  -F "api_key=你的密钥" \
-  -F "api_url=https://api.deepseek.com" \
-  -F "model_name=deepseek-chat"</code></pre>
-
-<h2>四、重要提醒</h2>
-<ul>
-<li><strong>长音频：</strong>3 小时视频约需 1-3 小时处理，建议先用 <code>transcribe_list</code> 轮询</li>
-<li><strong>GPU 占用：</strong>转写时 GPU 100% 满载，VRAM 占用 ~7.8GB/8GB</li>
-<li><strong>文件自动清理：</strong>处理完成后临时文件会自动删除</li>
-<li><strong>进度查询：</strong>任何时候都可以通过 <code>transcribe_status</code> 查看已转写出的文字</li>
-</ul>
-
-<h2>五、OpenAPI / Swagger</h2>
-<p>标准的 OpenAPI 规范可以在以下地址获得，主流 AI 框架可以直接解析：</p>
-<ul>
-<li>Swagger UI: <a href="http://{host}:8000/docs" style="color:#00d2ff">http://{host}:8000/docs</a></li>
-<li>OpenAPI JSON: <a href="http://{host}:8000/openapi.json" style="color:#00d2ff">http://{host}:8000/openapi.json</a></li>
-</ul>
-<p style="text-align:center;margin-top:60px;color:#888">—— 本页面由 ASR API 服务器自动生成 ——</p>
-</body></html>"""
+# ============ AI Agent / 开发者指南（已迁移到 SPA /#guide）============
 
 
 @app.get("/")
 async def root():
-    """重定向到 AI Agent 指南"""
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/guide")
+    """SPA 首页"""
+    return HTMLResponse((BASE_DIR / "frontend" / "index.html").read_text(encoding="utf-8"))
 
 
 @app.get("/guide")
-async def agent_guide():
-    """AI Agent / 开发者接入指南页面"""
-    import socket
-    hostname = socket.gethostbyname(socket.gethostname())
-    html = AGENT_GUIDE_HTML.replace("{host}", hostname)
-    return HTMLResponse(html)
+async def guide_redirect():
+    """重定向到 SPA 指南"""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/#guide")
 
 
-# ============ LLM 配置页面 ============
-CONFIG_HTML = r"""
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><title>LLM 配置 — ASR API</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100vh;display:flex;flex-direction:column}
-.header{background:#16213e;padding:16px 24px;border-bottom:1px solid #0f3460;display:flex;align-items:center;justify-content:space-between}
-.header h1{color:#00d2ff;font-size:1.3em}
-.header a{color:#888;text-decoration:none;font-size:.9em}
-.header a:hover{color:#00d2ff}
-.main{max-width:720px;margin:40px auto;padding:0 20px;flex:1}
-.card{background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:24px;margin-bottom:20px}
-.card h2{color:#ffd700;margin-bottom:16px;font-size:1.1em}
-.presets{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px}
-.preset-btn{padding:10px 18px;border:1px solid #0f3460;border-radius:6px;background:#1a1a2e;color:#e0e0e0;cursor:pointer;font-size:.9em;transition:all .2s}
-.preset-btn:hover{border-color:#00d2ff;color:#00d2ff}
-.preset-btn.active{border-color:#00d2ff;background:#0f3460;color:#00d2ff}
-.form-group{margin-bottom:16px}
-.form-group label{display:block;margin-bottom:6px;font-size:.9em;color:#aaa}
-.form-group input,.form-group select{width:100%;padding:10px 12px;border:1px solid #0f3460;border-radius:6px;background:#1a1a2e;color:#e0e0e0;font-size:.95em;font-family:monospace}
-.form-group input:focus{outline:none;border-color:#00d2ff}
-.form-hint{font-size:.8em;color:#666;margin-top:4px}
-.btn-row{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap}
-.btn{padding:10px 24px;border:none;border-radius:6px;cursor:pointer;font-size:.95em;font-weight:600;transition:all .2s}
-.btn-primary{background:#00d2ff;color:#1a1a2e}
-.btn-primary:hover{background:#33ddff}
-.btn-secondary{background:transparent;border:1px solid #0f3460;color:#e0e0e0}
-.btn-secondary:hover{border-color:#00d2ff}
-.btn-danger{background:transparent;border:1px solid #ff6b6b;color:#ff6b6b}
-.btn-danger:hover{background:#3d2e2e}
-.result{padding:12px;border-radius:6px;margin-top:16px;font-family:monospace;font-size:.9em;display:none}
-.result.success{display:block;background:#1e3d2e;border:1px solid #2ecc71;color:#2ecc71}
-.result.error{display:block;background:#3d2e2e;border:1px solid #ff6b6b;color:#ff6b6b}
-.result.info{display:block;background:#2e3d3e;border:1px solid #00d2ff;color:#7ec8e3}
-.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px}
-.status-dot.connected{background:#2ecc71}
-.status-dot.disconnected{background:#ff6b6b}
-code{background:#2d2d4e;padding:2px 6px;border-radius:3px}
-.footer{text-align:center;padding:20px;color:#666;font-size:.85em}
-</style></head>
-<body>
 
-<div class="header">
-  <h1>LLM 配置</h1>
-  <a href="/guide">返回指南</a>
-</div>
-
-<div class="main">
-
-  <div class="card">
-    <h2>预设模板</h2>
-    <div class="presets" id="presets">
-      <button class="preset-btn active" data-preset="deepseek">DeepSeek</button>
-      <button class="preset-btn" data-preset="openai">OpenAI</button>
-      <button class="preset-btn" data-preset="modelscope">魔搭 ModelScope</button>
-      <button class="preset-btn" data-preset="ollama">Ollama 本地</button>
-      <button class="preset-btn" data-preset="lmstudio">LM Studio</button>
-      <button class="preset-btn" data-preset="custom">自定义</button>
-    </div>
-    <form id="configForm">
-      <div class="form-group">
-        <label>API 地址 (base_url)</label>
-        <input type="text" id="apiUrl" value="https://api.deepseek.com" placeholder="https://api.deepseek.com">
-        <div class="form-hint">OpenAI 兼容接口地址，不需要加 /v1/chat/completions</div>
-      </div>
-      <div class="form-group">
-        <label>API Key</label>
-        <input type="password" id="apiKey" value="" placeholder="sk-..." autocomplete="off">
-        <div class="form-hint">密钥仅保存在浏览器 localStorage，不会上传到服务器</div>
-      </div>
-      <div class="form-group">
-        <label>模型名称</label>
-        <input type="text" id="modelName" value="deepseek-chat" placeholder="deepseek-chat">
-      </div>
-      <div class="form-group">
-        <label>系统提示词</label>
-        <input type="text" id="systemPrompt" value="你是一个专业的文档整理助手。请对以下课堂录音文本进行处理：
-1. 合并被切断的句子
-2. 修正ASR识别错误
-3. 补充专业术语的准确表述
-4. 恢复正确的标点符号
-5. 按语义分段，输出清晰的文档格式
-直接输出结果，不要多余的解释。" placeholder="自定义润色指令...">
-      </div>
-      <div class="btn-row">
-        <button type="button" class="btn btn-primary" onclick="saveAndTest()">保存并测试</button>
-        <button type="button" class="btn btn-secondary" onclick="saveConfig()">仅保存</button>
-        <button type="button" class="btn btn-danger" onclick="clearConfig()">清除配置</button>
-      </div>
-      <div id="result" class="result"></div>
-    </form>
-  </div>
-
-  <div class="card">
-    <h2>当前连接状态</h2>
-    <p><span class="status-dot" id="statusDot"></span><span id="statusText">未配置</span></p>
-    <div style="margin-top:12px;font-size:.85em;color:#888">
-      <p>API 地址: <code id="currentUrl">-</code></p>
-      <p>模型: <code id="currentModel">-</code></p>
-      <p>Key 已设置: <code id="currentKey">-</code></p>
-    </div>
-  </div>
-
-</div>
-
-<div class="footer">&mdash; 配置保存在浏览器本地，不会上传 &mdash;</div>
-
-<script>
-const PRESETS = {
-  deepseek: { url:"https://api.deepseek.com", model:"deepseek-chat", desc:"云端 DeepSeek，性价比高" },
-  openai:   { url:"https://api.openai.com/v1", model:"gpt-4o", desc:"云端 OpenAI" },
-  modelscope: { url:"https://api-inference.modelscope.cn/v1", model:"ZhipuAI/GLM-5", desc:"魔搭 ModelScope，推荐 GLM-5" },
-  ollama:   { url:"http://localhost:11434/v1", model:"qwen2.5:7b", desc:"本地免费，需安装 Ollama" },
-  lmstudio: { url:"http://localhost:1234/v1", model:"", desc:"本地免费，需安装 LM Studio" },
-  custom:   { url:"", model:"", desc:"手动填写" }
-};
-
-// Init
-const saved = JSON.parse(localStorage.getItem('asr_llm_config') || '{}');
-let currentPreset = saved._preset || 'deepseek';
-applyPreset(currentPreset, false);
-document.getElementById('apiKey').value = saved.api_key || '';
-document.getElementById('systemPrompt').value = saved.system_prompt || document.getElementById('systemPrompt').value;
-updateStatus();
-
-// Preset buttons
-document.querySelectorAll('.preset-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    currentPreset = btn.dataset.preset;
-    applyPreset(currentPreset, true);
-  });
-});
-
-function applyPreset(name, overwriteUrl) {
-  const p = PRESETS[name];
-  if (!p) return;
-  if (overwriteUrl || !document.getElementById('apiUrl').value) {
-    document.getElementById('apiUrl').value = p.url;
-  }
-  if (overwriteUrl || !document.getElementById('modelName').value) {
-    document.getElementById('modelName').value = p.model;
-  }
-}
-
-function getConfig() {
-  return {
-    api_url: document.getElementById('apiUrl').value.trim(),
-    api_key: document.getElementById('apiKey').value.trim(),
-    model_name: document.getElementById('modelName').value.trim(),
-    system_prompt: document.getElementById('systemPrompt').value.trim(),
-    _preset: currentPreset
-  };
-}
-
-function saveConfig() {
-  const c = getConfig();
-  localStorage.setItem('asr_llm_config', JSON.stringify(c));
-  showResult('info', '配置已保存到浏览器本地存储');
-  updateStatus();
-}
-
-async function saveAndTest() {
-  saveConfig();
-  const c = getConfig();
-  if (!c.api_url || !c.api_key || !c.model_name) {
-    showResult('error', '请填写 API 地址、API Key 和模型名称');
-    return;
-  }
-  showResult('info', '正在测试连接...');
-  try {
-    // 通过服务器的 /llm_test 端点测试
-    const r = await fetch('/llm_test', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: new URLSearchParams({api_url:c.api_url, api_key:c.api_key, model_name:c.model_name})
-    });
-    const data = await r.json();
-    if (data.success) {
-      showResult('success', '连接成功！模型可用');
-      updateStatus(true);
-    } else {
-      showResult('error', '连接失败: ' + data.detail);
-      updateStatus(false);
-    }
-  } catch(e) {
-    showResult('error', '测试失败: ' + e.message);
-  }
-}
-
-function clearConfig() {
-  localStorage.removeItem('asr_llm_config');
-  document.getElementById('apiKey').value = '';
-  showResult('info', '配置已清除');
-  updateStatus();
-}
-
-function showResult(type, msg) {
-  const el = document.getElementById('result');
-  el.className = 'result ' + type;
-  el.textContent = msg;
-}
-
-function updateStatus(connected) {
-  const dot = document.getElementById('statusDot');
-  const txt = document.getElementById('statusText');
-  const c = JSON.parse(localStorage.getItem('asr_llm_config') || '{}');
-  document.getElementById('currentUrl').textContent = c.api_url || '-';
-  document.getElementById('currentModel').textContent = c.model_name || '-';
-  document.getElementById('currentKey').textContent = c.api_key ? '是' : '否';
-  if (c.api_url && c.api_key && c.model_name) {
-    dot.className = 'status-dot ' + (connected === true ? 'connected' : (connected === false ? 'disconnected' : ''));
-    txt.textContent = connected === true ? '已连接' : (connected === false ? '连接失败' : '已配置（未测试）');
-  } else {
-    dot.className = 'status-dot disconnected';
-    txt.textContent = '未配置';
-  }
-}
-</script>
-</body></html>"""
 
 
 @app.get("/config")
-async def config_page():
-    """LLM 配置页面（网页端配置 API 信息）"""
-    return HTMLResponse(CONFIG_HTML)
+async def config_redirect():
+    """重定向到 SPA 配置页面"""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/#config")
 
 
 @app.post("/llm_test")
@@ -751,6 +364,11 @@ def _transcribe_file(mdl, file_id, input_path, ext, language, context, max_chars
 
         full_text = "".join(s["text"] for s in segments)
 
+        # 完成时保存完整结果到进度（供前端轮询），不删除
+        _update_progress(file_id, status="completed", full_text=full_text, segments=segments,
+                         words=all_words, duration_sec=round(total_duration, 2),
+                         language=language)
+
         return {
             "success": True,
             "file_id": file_id,
@@ -767,8 +385,7 @@ def _transcribe_file(mdl, file_id, input_path, ext, language, context, max_chars
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        with _progress_lock:
-            _transcription_progress.pop(file_id, None)
+        # 删除临时文件，但保留进度条目供前端轮询
         try:
             os.unlink(input_path)
             if ext in video_exts:
@@ -937,6 +554,124 @@ def full_pipeline(
     }
 
 
+# ============ 前端 SPA 静态文件服务 ============
+FRONTEND_DIR = BASE_DIR / "frontend"
+(FRONTEND_DIR / "css").mkdir(parents=True, exist_ok=True)
+(FRONTEND_DIR / "js" / "pages").mkdir(parents=True, exist_ok=True)
+
+# 挂载 /assets 提供静态文件（CSS/JS）
+app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIR)), name="assets")
+
+# ============ 排队系统 ============
+_processing_queue: list = []  # [{file_id, input_path, ext, language, context, max_chars, pause_threshold}]
+_queue_lock = threading.Lock()
+_is_processing = False
+
+def _queue_next():
+    """后台处理队列中的文件，一次一个"""
+    global _is_processing
+    while True:
+        item = None
+        with _queue_lock:
+            if not _processing_queue:
+                _is_processing = False
+                return
+            item = _processing_queue.pop(0)
+        _is_processing = True
+        try:
+            mdl = load_model()
+            _transcribe_file(mdl, **item)
+        except Exception as e:
+            _update_progress(item["file_id"], status="error", detail=str(e))
+        finally:
+            _is_processing = False
+
+
+@app.post("/transcribe_async")
+def transcribe_async(
+    file: UploadFile = File(...),
+    language: str = Form("Chinese"),
+    context: str = Form(""),
+    max_chars: int = Form(50),
+    pause_threshold: float = Form(0.3),
+):
+    """非阻塞上传 + 排队，立刻返回 file_id"""
+    file_id = str(uuid.uuid4())[:8]
+    ext = Path(file.filename).suffix.lower() if file.filename else ".wav"
+    input_path = TEMP_DIR / f"{file_id}{ext}"
+    with open(input_path, "wb") as f:
+        f.write(file.file.read())
+
+    task = dict(file_id=file_id, input_path=str(input_path), ext=ext,
+                language=language, context=context,
+                max_chars=max_chars, pause_threshold=pause_threshold)
+
+    with _queue_lock:
+        _processing_queue.append(task)
+        pos = len(_processing_queue)
+        global _is_processing
+        if not _is_processing:
+            threading.Thread(target=_queue_next, daemon=True).start()
+
+    _update_progress(file_id, status="queued", filename=file.filename or "unknown")
+    return {"file_id": file_id, "position": pos, "status": "queued"}
+
+
+# ============ 输出目录管理 ============
+_output_dir = str(BASE_DIR / "output")
+
+@app.get("/output_dir")
+def get_output_dir():
+    """获取当前输出目录"""
+    return {"path": _output_dir, "exists": os.path.isdir(_output_dir)}
+
+@app.post("/output_dir")
+def set_output_dir(path: str = Form(...)):
+    """设置输出目录"""
+    global _output_dir
+    p = Path(path).resolve()
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"无法创建目录: {e}")
+    _output_dir = str(p)
+    return {"success": True, "path": _output_dir}
+
+@app.post("/save_result")
+def save_result(
+    file_id: str = Form(...),
+    filename: str = Form("transcription.txt"),
+):
+    """将转写结果保存到输出目录"""
+    if not os.path.isdir(_output_dir):
+        raise HTTPException(status_code=400, detail="输出目录未配置")
+    with _progress_lock:
+        p = _transcription_progress.get(file_id)
+    if not p or p.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="任务未完成或不存在")
+    text = p.get("full_text", "")
+    if not text:
+        raise HTTPException(status_code=400, detail="没有转写文本")
+    out_path = Path(_output_dir) / filename
+    out_path.write_text(text, encoding="utf-8")
+    return {"success": True, "path": str(out_path)}
+
+
+# ============ 进度自动清理 ============
+async def _cleanup_old_progress():
+    """每分钟清理 10 分钟前的完成/错误任务"""
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        with _progress_lock:
+            expired = [
+                fid for fid, p in _transcription_progress.items()
+                if p.get("status") in ("completed", "error")
+                and now - p.get("_updated_at", 0) > 600
+            ]
+            for fid in expired:
+                del _transcription_progress[fid]
+
 # ============ 启动 ============
 if __name__ == "__main__":
     print(f"PyTorch: {torch.__version__} | CUDA: {torch.cuda.is_available()}")
@@ -952,11 +687,16 @@ if __name__ == "__main__":
     print(f"  本机访问: http://{host_ip}:8000")
     print(f"  局域网:   http://{host_ip}:8000  (其他设备用此地址)\n")
     print(f"  端点列表:")
-    print(f"    POST /transcribe      - ASR 转写")
-    print(f"    POST /transcribe_ass  - ASS 字幕下载")
-    print(f"    POST /refine          - LLM 润色文本")
-    print(f"    POST /full_pipeline   - 完整流水线（ASR + LLM）")
-    print(f"    GET  /health          - 健康检查")
-    print(f"    GET  /guide           - AI Agent 接入指南")
-    print(f"    GET  /config          - LLM 配置页面\n")
+    print(f"    GET  /                 - SPA 前端首页")
+    print(f"    POST /transcribe       - ASR 转写（阻塞）")
+    print(f"    POST /transcribe_async - ASR 转写（非阻塞+排队）")
+    print(f"    POST /transcribe_ass   - ASS 字幕下载")
+    print(f"    POST /transcribe_url   - URL 转写")
+    print(f"    POST /refine           - LLM 润色文本")
+    print(f"    POST /full_pipeline    - 完整流水线（ASR + LLM）")
+    print(f"    GET  /health           - 健康检查")
+    print(f"    GET  /guide            - SPA 指南")
+    print(f"    GET  /config           - SPA 配置")
+    print(f"    GET  /output_dir       - 输出目录管理")
+    print(f"    POST /save_result      - 保存结果到输出目录\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)
