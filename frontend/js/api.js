@@ -82,6 +82,21 @@ export const API = {
     return r.text();
   },
 
+  // ASS translation (AI bilingual)
+  async assTranslate(file, opts = {}) {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('api_key', opts.api_key || '');
+    fd.append('api_url', opts.api_url || 'https://api.deepseek.com');
+    fd.append('model_name', opts.model_name || 'deepseek-chat');
+    fd.append('system_prompt', opts.system_prompt || '');
+    fd.append('temperature', String(opts.temperature ?? 0.3));
+    fd.append('batch_size', String(opts.batch_size ?? 200));
+    fd.append('target_language', opts.target_language || 'Chinese');
+    const r = await req('/ass_translate', { method: 'POST', body: fd });
+    return r.text();
+  },
+
   // LLM test
   async llmTest(config) {
     const params = new URLSearchParams({

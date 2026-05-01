@@ -1,6 +1,10 @@
+# Secrets
+.env
+
 # Temp and generated
 output/
 results/
+temp/
 project_for_chatgpt.md
 project_source.zip
 __pycache__/
@@ -10,7 +14,12 @@ __pycache__/
 .vscode/
 .idea/
 
-# Claude
-.claude/
+# Superpowers
 .superpowers/
 docs/
+
+# Models (large files)
+models/
+
+# Frontend assets
+frontend/bg.jpg

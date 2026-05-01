@@ -238,6 +238,12 @@ select.form-input { cursor: pointer; }
 /* Row actions */
 .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
+/* Tab bar */
+.tab-bar { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 16px; }
+.tab-btn { padding: 8px 20px; border: none; background: transparent; color: var(--text-dim); font-size: 0.88em; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; }
+.tab-btn:hover { color: var(--text-primary); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
 /* Spinner */
 .spinner { display: inline-block; width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -248,6 +254,9 @@ select.form-input { cursor: pointer; }
 .mt-16 { margin-top: 16px; }
 .text-dim { color: var(--text-dim); }
 .text-sm { font-size: 0.85em; }
+.text-success { color: var(--success); }
+.text-error { color: var(--error); }
+.text-accent { color: var(--accent); }
 .text-mono { font-family: monospace; }
 .flex { display: flex; }
 .flex-1 { flex: 1; }

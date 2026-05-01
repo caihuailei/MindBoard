@@ -2,12 +2,14 @@
 Qwen3-ASR API Server v2
 参考 Transby2 的 merge 逻辑 + LLM 后处理
 """
-import os, sys, json, uuid, tempfile, re, time, subprocess, asyncio
+import logging
+import os, sys, json, uuid, tempfile, re, time, subprocess, asyncio, random
 from pathlib import Path
 from typing import Optional, List
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+from config import settings
 import torch
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -17,26 +19,41 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from qwen_asr import Qwen3ASRModel
 
-# ============ 配置 ============
+# ============ 日志 ============
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("asr-api")
+
+# ============ 配置（从 .env / 环境变量加载）============
 BASE_DIR = Path(__file__).parent
-MODEL_PATH = str(BASE_DIR / "models" / "Qwen3-ASR-1.7B")
-ALIGNER_PATH = str(BASE_DIR / "models" / "Qwen3-ForcedAligner-0.6B")
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-TEMP_DIR = Path(tempfile.gettempdir()) / "asr_api"
+MODEL_PATH = str(BASE_DIR / settings.model_path)
+ALIGNER_PATH = str(BASE_DIR / settings.aligner_path)
+DEVICE = settings.device if torch.cuda.is_available() else "cpu"
+TEMP_DIR = Path(tempfile.gettempdir()) / settings.temp_dir
 TEMP_DIR.mkdir(exist_ok=True)
-RESULTS_DIR = BASE_DIR / "results"
+RESULTS_DIR = BASE_DIR / settings.results_dir
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 @asynccontextmanager
 async def _lifespan(app):
     """启动时清理残留 chunk、创建目录、启动定时清理"""
+    logger.info(f"Temp dir: {TEMP_DIR}")
+    logger.info(f"Results dir: {RESULTS_DIR}")
+
     # Clean up leftover chunk files from interrupted sessions
-    for cf in RESULTS_DIR.glob("*_chunk_*.json"):
+    chunks = list(RESULTS_DIR.glob("*_chunk_*.json"))
+    for cf in chunks:
         try:
             cf.unlink()
         except Exception:
             pass
-    output_dir = BASE_DIR / "output"
+    if chunks:
+        logger.info(f"Cleaned {len(chunks)} leftover chunk files")
+
+    output_dir = BASE_DIR / settings.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     cleanup_task = asyncio.create_task(_cleanup_old_progress())
     yield
@@ -174,7 +191,7 @@ def load_model():
     global model
     if model is not None:
         return model
-    print(f"加载模型中... (device={DEVICE})")
+    logger.info(f"加载模型中... (device={DEVICE})")
     model = Qwen3ASRModel.from_pretrained(
         pretrained_model_name_or_path=MODEL_PATH,
         dtype=torch.bfloat16,
@@ -189,7 +206,7 @@ def load_model():
             attn_implementation="sdpa",
         ),
     )
-    print("模型加载完成！")
+    logger.info("模型加载完成！")
     return model
 
 
@@ -455,8 +472,7 @@ def _transcribe_file(mdl, file_id, input_path, ext, language, context, max_chars
 
     except Exception as e:
         _update_progress(file_id, status="error")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"Transcription error for file_id={file_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         # 删除临时文件，但保留进度条目供前端轮询
@@ -482,34 +498,402 @@ def transcribe_ass(
     result = transcribe(file=file, language=language, context=context)
     segments = result["segments"]
 
-    # 生成 ASS
-    ass = """[Script Info]
-ScriptType: v4.00+
-PlayResX: 1920
-PlayResY: 1080
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: 原文,苹方 中等,40,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,20,20,20,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
+    # 生成 ASS（重叠检测 + 双样式头部）
+    ass = _generate_ass_header()
+    last_end_s = 0
     for s in segments:
-        start = _fmt_time(s["start"])
-        end = _fmt_time(s["end"])
+        start_s = float(s["start"])
+        end_s = float(s["end"])
+        # 防止时间轴重叠
+        if start_s < last_end_s:
+            start_s = last_end_s
+        if end_s <= start_s:
+            end_s = start_s + 0.01
+        start = _fmt_ass_time(start_s)
+        end = _fmt_ass_time(end_s)
         text = s["text"].replace("\n", "\\N")
         ass += f"Dialogue: 0,{start},{end},原文,,0,0,0,,{text}\n"
+        last_end_s = end_s
 
     return PlainTextResponse(ass, media_type="text/plain; charset=utf-8-sig",
                              headers={"Content-Disposition": "attachment; filename=subtitle.ass"})
 
 
-def _fmt_time(sec: float) -> str:
+def _fmt_ass_time(sec: float) -> str:
+    """秒数 → ASS 时间 h:mm:ss.cc（centisecond 精度）"""
     h = int(sec // 3600)
     m = int((sec % 3600) // 60)
-    s = sec % 60
-    return f"{h:01d}:{m:02d}:{s:05.2f}"
+    s = int(sec % 60)
+    cs = int((sec - int(sec)) * 100)
+    return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def _generate_ass_header() -> str:
+    """生成标准 ASS 文件头部（Aegisub 兼容、双样式、1080p）"""
+    return """[Script Info]
+; Script generated by Aegisub 9212-dev-3a38bf16a
+; http://www.aegisub.org/
+Title:
+ScriptType: v4.00+
+PlayDepth: 0
+PlayResX: 1920
+PlayResY: 1080
+WrapStyle: 0
+ScaledBorderAndShadow: no
+YCbCr Matrix: TV.709
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: 原文,思源黑体 CN,70,&H00FFFFFF,&H000019FF,&H1E000000,&H9E000000,-1,0,0,0,100,100,1,0,1,3.5,0,2,6,6,10,1
+Style: 对话,思源黑体 CN,70,&H00FFFFFF,&H000019FF,&H1E000000,&H9E000000,-1,0,0,0,100,100,1,0,1,3.5,0,2,6,6,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+# ============ ASS 辅助函数 ============
+_ASS_DIALOGUE_RE = re.compile(
+    r'Dialogue:\s*([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),(.*)'
+)
+
+
+def _parse_ass_dialogue(line: str):
+    """解析 ASS Dialogue 行 → dict"""
+    m = _ASS_DIALOGUE_RE.match(line.strip())
+    if not m:
+        return None
+    p = m.groups()
+    return {
+        'Layer': p[0], 'Start': p[1], 'End': p[2], 'Style': p[3], 'Name': p[4],
+        'MarginL': p[5], 'MarginR': p[6], 'MarginV': p[7], 'Effect': p[8], 'Text': p[9],
+    }
+
+
+def _ass_time_to_seconds(ass_time: str) -> float:
+    """ASS 时间 h:mm:ss.cc → 秒数"""
+    try:
+        parts = ass_time.split(':')
+        secs = parts[2].split('.')
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(secs[0]) + (int(secs[1]) if len(secs) > 1 else 0) / 100
+    except Exception:
+        return 0.0
+
+
+def _parse_ass_file(ass_text: str) -> list:
+    """解析 ASS 全文 → Dialogue 行列表"""
+    dialogues = []
+    for line in ass_text.splitlines():
+        d = _parse_ass_dialogue(line)
+        if d:
+            dialogues.append(d)
+    return dialogues
+
+
+def _extract_ass_header(ass_text: str) -> str:
+    """提取 ASS 头部（[Events] Format 行及之前）"""
+    lines = ass_text.splitlines()
+    header_end = -1
+    for i, line in enumerate(lines):
+        if line.strip().startswith('Format: Layer, Start, End, Style'):
+            header_end = i
+            break
+    if header_end < 0:
+        return _generate_ass_header()
+    return '\n'.join(lines[:header_end]) + '\n'
+
+
+def _clean_json_string(raw: str) -> str:
+    """修复 LLM 返回的 JSON（去除 markdown 代码块、修复常见格式问题）"""
+    s = raw.strip()
+    # Remove markdown code blocks
+    if s.startswith('```'):
+        lines = s.split('\n')
+        if lines[0].startswith('```'):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith('```'):
+            lines = lines[:-1]
+        s = '\n'.join(lines)
+    # Find JSON object boundaries
+    start = s.find('{')
+    end = s.rfind('}')
+    if start >= 0 and end > start:
+        s = s[start:end + 1]
+    return s
+
+
+def _prepare_ass_input(dialogue_lines: list) -> tuple:
+    """从 Dialogue 行提取 API 输入 + context_map"""
+    api_items = []
+    context_map = {}
+    for d in dialogue_lines:
+        api_items.append({"timestamp": d['Start'], "text": d['Text']})
+        context_map[d['Start']] = d
+    return api_items, context_map
+
+
+def _reconstruct_ass_from_response(api_response: dict, context_map: dict) -> tuple:
+    """根据 AI 翻译结果重建 ASS Dialogue 行（Style=对话）"""
+    if 'translatedSentences' not in api_response:
+        return [], []
+
+    new_lines = []
+    log_entries = []
+    for sent in api_response['translatedSentences']:
+        translated_text = sent.get('sentence', '')
+        related = sent.get('relatedInputItems', [])
+        if not related:
+            continue
+        first_ts = related[0]['timestamp']
+        last_ts = related[-1]['timestamp']
+        if first_ts not in context_map or last_ts not in context_map:
+            continue
+        meta = context_map[first_ts]
+        start_time = meta['Start']
+        end_time = context_map[last_ts]['End']
+        # 标点替换：中文逗号/句号 → 空格，引号 → 日文样式
+        processed = translated_text
+        for old, new in [('，', ' '), ('。', ' '), ('、', ' '), ('"', '「'), ('"', '」'),
+                          ('《', '『'), ('》', '』'), ('！', ' '), ('？', ' ')]:
+            processed = processed.replace(old, new)
+        line = (f"Dialogue: {meta['Layer']},{start_time},{end_time},对话,{meta['Name']},"
+                f"{meta['MarginL']},{meta['MarginR']},{meta['MarginV']},{meta['Effect']},{processed}")
+        new_lines.append(line)
+        log_entries.append(f"{translated_text}")
+        for item in related:
+            log_entries.append(f"{item['text']},{item['timestamp']},{end_time}")
+        log_entries.append("")
+    return new_lines, log_entries
+
+
+def _segment_by_time_window(segments: list, window_minutes: int) -> list:
+    """按时间窗分割 ASS segments → 重叠时间段列表"""
+    if not segments:
+        return []
+    window_sec = window_minutes * 60
+    start_sec = _ass_time_to_seconds(segments[0]['Start'])
+    end_sec = _ass_time_to_seconds(segments[-1]['End'])
+    windows = []
+    current = start_sec
+    while current < end_sec:
+        win_end = current + window_sec
+        win_segs = [
+            s for s in segments
+            if _ass_time_to_seconds(s['Start']) < win_end and _ass_time_to_seconds(s['End']) > current
+        ]
+        if win_segs:
+            windows.append(win_segs)
+        current += window_sec
+    return windows
+
+
+def _build_window_text(window_segments: list) -> str:
+    """将时间段 segments 格式化为文本"""
+    return '\n'.join(f"[{s['Start']}] {s['Text']}" for s in window_segments)
+
+
+# ============ ASS 翻译 ============
+@app.post("/ass_translate")
+def ass_translate(
+    file: UploadFile = File(...),
+    api_key: str = Form(""),
+    api_url: str = Form("https://api.deepseek.com"),
+    model_name: str = Form("deepseek-chat"),
+    system_prompt: str = Form("你是一个专业的翻译助手。请将提供的字幕文本翻译为目标语言，保持时间戳和格式不变。"),
+    temperature: float = Form(0.3),
+    batch_size: int = Form(200),
+    target_language: str = Form("Chinese"),
+):
+    """上传 ASS 文件 → AI 翻译 → 输出双语 ASS（原文 + 译文双样式）"""
+    if not api_key:
+        raise HTTPException(status_code=400, detail="需要提供 API Key")
+
+    raw = file.file.read().decode('utf-8-sig')
+    header = _extract_ass_header(raw)
+    dialogue_lines = [line for line in raw.splitlines() if line.strip().startswith('Dialogue:')]
+
+    if not dialogue_lines:
+        raise HTTPException(status_code=400, detail="ASS 文件中没有 Dialogue 行")
+
+    api_items, context_map = _prepare_ass_input([_parse_ass_dialogue(l) for l in dialogue_lines if _parse_ass_dialogue(l)])
+
+    # Batch translation
+    total_batches = (len(api_items) + batch_size - 1) // batch_size
+    logger.info(f"ASS 翻译: {len(api_items)} 行, {total_batches} 批")
+
+    all_new_lines = []
+    all_log = []
+    for batch_num in range(total_batches):
+        start_idx = batch_num * batch_size
+        end_idx = min((batch_num + 1) * batch_size, len(api_items))
+        batch_items = api_items[start_idx:end_idx]
+        user_text = json.dumps(batch_items, ensure_ascii=False, indent=2)
+
+        try:
+            response = _call_llm(api_key, api_url, model_name, system_prompt, user_text, temperature)
+            content = response.choices[0].message.content
+            cleaned = _clean_json_string(content)
+            parsed = json.loads(cleaned)
+            new_lines, log_entries = _reconstruct_ass_from_response(parsed, context_map)
+            all_new_lines.extend(new_lines)
+            all_log.extend(log_entries)
+        except Exception as e:
+            logger.error(f"ASS 翻译批次 {batch_num + 1} 失败: {e}")
+
+    # Build output: header + original lines + translated lines
+    output = header + '\n' + '\n'.join(dialogue_lines) + '\n' + '\n'.join(all_new_lines) + '\n'
+    basename = (file.filename or 'subtitle').rsplit('.', 1)[0] if file.filename else 'subtitle'
+
+    return PlainTextResponse(
+        '﻿' + output,  # UTF-8 BOM
+        media_type="text/plain; charset=utf-8-sig",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{basename}_bilingual.ass"},
+    )
+
+
+# ============ ASS 水印 ============
+@app.post("/ass_watermark")
+def ass_watermark(
+    file: UploadFile = File(...),
+    text: str = Form(...),
+):
+    """上传 ASS 文件 → 添加随机位置水印 → 下载"""
+    raw = file.file.read().decode('utf-8-sig')
+    lines = raw.splitlines()
+
+    # 找到最后一个 Dialogue 行的结束时间
+    last_end_sec = 0.0
+    for line in lines:
+        d = _parse_ass_dialogue(line)
+        if d:
+            end = _ass_time_to_seconds(d['End'])
+            if end > last_end_sec:
+                last_end_sec = end
+
+    # 生成水印行
+    watermark_lines = []
+    ms_s = 0; ss_s = 0; mm_s = 0; hh_s = 0
+    while True:
+        ms_rand = random.randint(40, 100)
+        ss_rand = random.randint(35, 145)
+        x_pos = random.randint(300, 1600)
+        y_pos = random.randint(100, 1000)
+        ms_e = ms_s + ms_rand
+        ss_e = ss_s + ss_rand
+        if ms_e >= 100:
+            ss_e = ss_s + ms_e // 100
+            ms_e = ms_e - (ms_e // 100) * 100
+        if ss_e >= 60:
+            ss_e -= 60; mm_s += 1
+        if mm_s >= 60:
+            mm_s -= 60; hh_s += 1
+        mm_e = mm_s; hh_e = hh_s
+        if ms_e >= 100:
+            ss_e += 1; ms_e -= 100
+        if ss_e >= 60:
+            ss_e -= 60; mm_e += 1
+        if mm_e >= 60:
+            mm_e -= 60; hh_e += 1
+
+        ass_tag = f"{{\\pos({x_pos},{y_pos})}}"
+        item = f"Dialogue: 1,{hh_s:01d}:{mm_s:02d}:{ss_s:02d}.{ms_s:02d},{hh_e:01d}:{mm_e:02d}:{ss_e:02d}.{ms_e:02d},水印,,0,0,0,,{ass_tag}{text}"
+        watermark_lines.append(item)
+
+        ms_s = ms_e; ss_s = ss_e; mm_s = mm_e; hh_s = hh_e
+        if hh_e * 3600 + mm_e * 60 + ss_e > last_end_sec:
+            break
+
+    output = raw.rstrip() + '\n' + '\n'.join(watermark_lines) + '\n'
+    basename = (file.filename or 'subtitle').rsplit('.', 1)[0] if file.filename else 'subtitle'
+
+    return PlainTextResponse(
+        output,
+        media_type="text/plain; charset=utf-8-sig",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{basename}_watermarked.ass"},
+    )
+
+
+# ============ ASS 轴审 ============
+@app.post("/ass_audit")
+def ass_audit(file: UploadFile = File(...)):
+    """上传 ASS 文件 → 检测闪轴/叠轴 → 返回问题列表"""
+    raw = file.file.read().decode('utf-8-sig')
+    lines = raw.splitlines()
+    dialogues = [(i, _parse_ass_dialogue(line)) for i, line in enumerate(lines) if _parse_ass_dialogue(line)]
+
+    issues = []
+    for idx, (i, front) in enumerate(dialogues):
+        for j, back in dialogues[idx + 1:]:
+            if front['Style'] != back['Style']:
+                continue
+            prev_end = _ass_time_to_seconds(front['End'])
+            curr_start = _ass_time_to_seconds(back['Start'])
+            gap = curr_start - prev_end
+            if gap < 0:
+                issues.append({"line": idx + 1, "next_line": idx + 2, "gap_ms": round(gap * 1000), "type": "overlap"})
+                break
+            elif gap < 0.3:
+                issues.append({"line": idx + 1, "next_line": idx + 2, "gap_ms": round(gap * 1000), "type": "flash"})
+                break
+
+    return {"issues": issues, "total": len(issues)}
+
+
+# ============ ASS 片段总结 ============
+@app.post("/ass_summary")
+def ass_summary(
+    file: UploadFile = File(...),
+    time_window: int = Form(15),
+    api_key: str = Form(""),
+    api_url: str = Form("https://api.deepseek.com"),
+    model_name: str = Form("deepseek-chat"),
+    temperature: float = Form(0.3),
+):
+    """上传 ASS 文件 → 按时间段分割 → AI 总结 → 返回结构化 JSON"""
+    if not api_key:
+        raise HTTPException(status_code=400, detail="需要提供 API Key")
+
+    raw = file.file.read().decode('utf-8-sig')
+    dialogues = _parse_ass_file(raw)
+    if not dialogues:
+        raise HTTPException(status_code=400, detail="ASS 文件中没有 Dialogue 行")
+
+    windows = _segment_by_time_window(dialogues, time_window)
+    logger.info(f"ASS 总结: {len(dialogues)} 行, 分为 {len(windows)} 个时间段")
+
+    segments = []
+    for idx, win_segs in enumerate(windows, 1):
+        win_text = _build_window_text(win_segs)
+        start_time = win_segs[0]['Start']
+        end_time = win_segs[-1]['End']
+
+        prompt = f"""请对以下字幕时间段的内容进行结构化总结。返回纯 JSON，格式如下：
+{{
+  "topic": "本段主题描述（一句话）",
+  "flow": "对话流程（简述）",
+  "key_points": ["要点1", "要点2", ...],
+  "tone": "情感基调（如：学术讨论/轻松对话/严肃演讲等）"
+}}
+
+字幕内容：
+{win_text}"""
+
+        try:
+            response = _call_llm(api_key, api_url, model_name, "你是一个专业的内容分析助手。请对提供的字幕内容进行结构化分析，返回 JSON 格式的总结。", prompt, temperature)
+            content = response.choices[0].message.content
+            cleaned = _clean_json_string(content)
+            summary = json.loads(cleaned)
+        except Exception as e:
+            summary = {"topic": f"分析失败: {str(e)}", "flow": "", "key_points": [], "tone": ""}
+
+        segments.append({
+            "index": idx,
+            "start_time": start_time,
+            "end_time": end_time,
+            "summary": summary,
+        })
+
+    return {"segments": segments, "total_windows": len(windows)}
 
 
 # ============ LLM 后处理端点 ============
@@ -732,7 +1116,7 @@ def transcribe_async(
 
 
 # ============ 输出目录管理 ============
-_output_dir = str(BASE_DIR / "output")
+_output_dir = str(BASE_DIR / settings.output_dir)
 
 @app.get("/output_dir")
 def get_output_dir():
@@ -941,40 +1325,43 @@ async def _cleanup_old_progress():
 
 # ============ 启动 ============
 if __name__ == "__main__":
-    print(f"PyTorch: {torch.__version__} | CUDA: {torch.cuda.is_available()}")
+    logger.info(f"PyTorch: {torch.__version__} | CUDA: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)} | VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        logger.info(f"GPU: {torch.cuda.get_device_name(0)} | VRAM: {vram_gb:.1f} GB")
     import socket
     try:
         host_ip = socket.gethostbyname(socket.gethostname())
     except Exception:
         host_ip = "127.0.0.1"
-    print(f"\nAPI 服务启动成功！")
-    print(f"  本机访问: http://localhost:8000")
-    print(f"  本机访问: http://{host_ip}:8000")
-    print(f"  局域网:   http://{host_ip}:8000  (其他设备用此地址)\n")
-    print(f"  端点列表:")
-    print(f"    GET  /                 - SPA 前端首页")
-    print(f"    POST /transcribe       - ASR 转写（阻塞）")
-    print(f"    POST /transcribe_async - ASR 转写（非阻塞+排队）")
-    print(f"    POST /transcribe_ass   - ASS 字幕下载")
-    print(f"    POST /refine           - LLM 润色文本（非流式）")
-    print(f"    POST /refine_stream    - LLM 润色文本（流式 SSE）")
-    print(f"    POST /full_pipeline    - 完整流水线（ASR + LLM）")
-    print(f"    GET  /health           - 健康检查")
-    print(f"    GET  /guide            - SPA 指南")
-    print(f"    GET  /config           - SPA 配置")
-    print(f"    GET  /output_dir       - 获取输出目录")
-    print(f"    POST /output_dir       - 设置输出目录")
-    print(f"    POST /save_result      - 保存转写结果到输出目录（.md）")
-    print(f"    POST /save_text        - 保存任意文本到输出目录")
-    print("    GET  /transcribe_status/{file_id} - 查看转写进度")
-    print("    GET  /transcribe_stream/{file_id} - SSE 流式转写进度")
-    print(f"    GET  /transcribe_list   - 列出进行中任务")
-    print(f"    GET  /results           - 列出持久化结果")
-    print(f"    GET  /results/{{file_id}}   - 获取单个结果（含 full_text）")
-    print(f"    GET  /files             - 列出输出目录文件（LAN 访问）")
-    print(f"    GET  /download/{{filename}} - 下载输出目录文件（LAN 访问）")
-    print(f"    GET  /llm_config       - 获取 LLM 配置（AI Agent）")
-    print(f"    POST /llm_config       - 设置 LLM 配置（AI Agent）\n")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    logger.info(f"API 服务启动成功！")
+    logger.info(f"  本机访问: http://localhost:{settings.api_port}")
+    logger.info(f"  局域网:   http://{host_ip}:{settings.api_port}")
+    logger.info(f"  端点列表:")
+    logger.info(f"    GET  /                 - SPA 前端首页")
+    logger.info(f"    POST /transcribe       - ASR 转写（阻塞）")
+    logger.info(f"    POST /transcribe_async - ASR 转写（非阻塞+排队）")
+    logger.info(f"    POST /transcribe_ass   - ASS 字幕下载")
+    logger.info(f"    POST /ass_translate    - ASS 字幕 AI 翻译（双语输出）")
+    logger.info(f"    POST /ass_watermark    - ASS 字幕水印生成")
+    logger.info(f"    POST /ass_audit        - ASS 字幕轴审（闪轴/叠轴检测）")
+    logger.info(f"    POST /ass_summary      - ASS 字幕片段总结（AI 分析）")
+    logger.info(f"    POST /refine           - LLM 润色文本（非流式）")
+    logger.info(f"    POST /refine_stream    - LLM 润色文本（流式 SSE）")
+    logger.info(f"    POST /full_pipeline    - 完整流水线（ASR + LLM）")
+    logger.info(f"    GET  /health           - 健康检查")
+    logger.info(f"    GET  /guide            - SPA 指南")
+    logger.info(f"    GET  /config           - SPA 配置")
+    logger.info(f"    GET  /output_dir       - 获取输出目录")
+    logger.info(f"    POST /output_dir       - 设置输出目录")
+    logger.info(f"    POST /save_result      - 保存转写结果到输出目录（.md）")
+    logger.info(f"    POST /save_text        - 保存任意文本到输出目录")
+    logger.info(f"    GET  /transcribe_status/{{file_id}} - 查看转写进度")
+    logger.info(f"    GET  /transcribe_stream/{{file_id}} - SSE 流式转写进度")
+    logger.info(f"    GET  /transcribe_list   - 列出进行中任务")
+    logger.info(f"    GET  /results           - 列出持久化结果")
+    logger.info(f"    GET  /results/{{file_id}}   - 获取单个结果（含 full_text）")
+    logger.info(f"    GET  /files             - 列出输出目录文件（LAN 访问）")
+    logger.info(f"    GET  /download/{{filename}} - 下载输出目录文件（LAN 访问）")
+    logger.info(f"    POST /llm_config       - 设置 LLM 配置（AI Agent）")
+    uvicorn.run(app, host=settings.api_host, port=settings.api_port)
