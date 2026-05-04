@@ -178,6 +178,20 @@ export const API = {
     return fullText;
   },
 
+  // AI analysis
+  async aiAnalyze(text, mode, customPrompt, config) {
+    const fd = new FormData();
+    fd.append('text', text);
+    fd.append('mode', mode || 'summarize');
+    fd.append('system_prompt', customPrompt || '');
+    fd.append('api_key', config.api_key || '');
+    fd.append('api_url', config.api_url || '');
+    fd.append('model_name', config.model_name || '');
+    fd.append('temperature', String(config.temperature ?? 0.3));
+    const r = await req('/ai_analyze', { method: 'POST', body: fd });
+    return r.json();
+  },
+
   // LLM config (for AI Agent)
   async getLlmConfig() {
     const r = await req('/llm_config');
@@ -239,6 +253,17 @@ export const API = {
     return r.json();
   },
 
+  async deleteResult(fileId) {
+    const r = await req(`/results/${fileId}`, { method: 'DELETE' });
+    return r.json();
+  },
+
+  // System metrics
+  async getSystemMetrics() {
+    const r = await req('/system_metrics');
+    return r.json();
+  },
+
   // File downloads (LAN access)
   async listFiles() {
     const r = await req('/files');
@@ -249,4 +274,205 @@ export const API = {
   downloadUrl(filename) {
     return `/download/${filename}`;
   },
+
+  // nanobot management
+  async nanobotStatus() {
+    const r = await req('/nanobot/status');
+    return r.json();
+  },
+
+  async nanobotStart() {
+    const r = await req('/nanobot/start', { method: 'POST' });
+    return r.json();
+  },
+
+  async nanobotStop() {
+    const r = await req('/nanobot/stop', { method: 'POST' });
+    return r.json();
+  },
+
+  async getNanobotConfig() {
+    const r = await req('/nanobot/config');
+    return r.json();
+  },
+
+  async setNanobotConfig(config) {
+    const r = await req('/nanobot/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+    return r.json();
+  },
+
+  async getNanobotMemory(filename) {
+    const r = await req(`/nanobot/memory/${filename}`);
+    return r.json();
+  },
+
+  async resetNanobotMemory(filename) {
+    const r = await req(`/nanobot/memory/${filename}/reset`, { method: 'POST' });
+    return r.json();
+  },
+
+  async getNanobotProvider() {
+    const r = await req('/nanobot/provider');
+    return r.json();
+  },
+
+  async setNanobotProvider(config) {
+    const r = await req('/nanobot/provider', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+    return r.json();
+  },
+
+  // Nanobot workspace file read/write
+  async saveNanobotWorkspace(filename, content) {
+    const fd = new FormData();
+    fd.append('content', content);
+    const r = await req(`/nanobot/workspace/${encodeURIComponent(filename)}`, {
+      method: 'POST',
+      body: fd,
+    });
+    return r.json();
+  },
+
+  async getNanobotFile(filename) {
+    const r = await req(`/nanobot/memory/${encodeURIComponent(filename)}`);
+    return r.json();
+  },
 };
+
+// ── WebSocket Client ──
+class WSClient {
+  constructor() {
+    this.ws = null;
+    this.handlers = {};
+    this.reconnectAttempts = 0;
+    this.maxReconnects = 5;
+    this.heartbeatInterval = null;
+    this.lastPong = Date.now();
+    this.connected = false;
+  }
+
+  connect() {
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${protocol}//${location.host}/ws`;
+    try {
+      this.ws = new WebSocket(url);
+    } catch (e) {
+      console.warn('WebSocket not available:', e.message);
+      return;
+    }
+
+    this.ws.onopen = () => {
+      this.connected = true;
+      this.reconnectAttempts = 0;
+      this.lastPong = Date.now();
+      this.startHeartbeat();
+      this.emit('connected');
+      console.log('[WS] Connected to', this.ws.url);
+    };
+
+    this.ws.onmessage = (event) => {
+      const data = event.data;
+      if (data === 'pong') {
+        this.lastPong = Date.now();
+        return;
+      }
+      try {
+        const msg = JSON.parse(data);
+        if (msg.type?.startsWith('job:')) {
+          console.log('[WS] job event:', msg.type, msg);
+        }
+        this.emit('message', msg);
+        // Route to specific event type
+        if (msg.type) {
+          this.emit(msg.type, msg);
+          // job:* events → 'job' handler
+          if (msg.type.startsWith('job:')) {
+            this.emit('job', { type: msg.type, data: msg });
+          }
+        }
+      } catch (e) {
+        // Ignore parse errors
+      }
+    };
+
+    this.ws.onclose = () => {
+      this.connected = false;
+      this.stopHeartbeat();
+      this.emit('disconnected');
+      // Don't auto-reconnect if maxReconnects <= 0
+      if (this.reconnectAttempts < this.maxReconnects) {
+        this.tryReconnect();
+      }
+    };
+
+    this.ws.onerror = () => {
+      // Errors are handled via onclose
+    };
+  }
+
+  send(type, data = {}) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type, ...data }));
+    }
+  }
+
+  on(event, handler) {
+    if (!this.handlers[event]) this.handlers[event] = [];
+    this.handlers[event].push(handler);
+  }
+
+  off(event, handler) {
+    if (this.handlers[event]) {
+      this.handlers[event] = this.handlers[event].filter(h => h !== handler);
+    }
+  }
+
+  emit(event, data) {
+    const handlers = this.handlers[event] || [];
+    handlers.forEach(h => { try { h(data); } catch (e) { console.error('WS handler error:', e); } });
+  }
+
+  disconnect() {
+    this.maxReconnects = 0; // Prevent auto-reconnect
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.stopHeartbeat();
+  }
+
+  startHeartbeat() {
+    this.heartbeatInterval = setInterval(() => {
+      if (Date.now() - this.lastPong > 45000) {
+        // Dead connection
+        console.warn('WebSocket dead, reconnecting...');
+        if (this.ws) this.ws.close();
+        return;
+      }
+      this.send('ping');
+    }, 30000);
+  }
+
+  stopHeartbeat() {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+  }
+
+  tryReconnect() {
+    if (this.reconnectAttempts >= this.maxReconnects) return;
+    this.reconnectAttempts++;
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1), 30000);
+    setTimeout(() => this.connect(), delay);
+  }
+}
+
+API.ws = new WSClient();

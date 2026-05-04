@@ -306,9 +306,10 @@ function startPolling(fileId, row) {
         toast('任务不存在: ' + fileId, 'error');
       }
 
-      // Accumulate words — server only sends new words (len-diff based), frontend accumulates
+      // Accumulate words — server sends ALL words seen so far, not just new ones
+      // So we replace, not append
       if (data.status === 'transcribing' && data.words && data.words.length > 0) {
-        liveWords.push(...data.words);
+        liveWords = data.words.slice();
         renderLiveWords(liveWords, data);
       }
     },
@@ -320,6 +321,8 @@ function startPolling(fileId, row) {
 }
 
 function saveResult(data, row) {
+  // Don't save if already tracked (prevents duplicates across page nav)
+  if (savedFileIds.has(data.file_id)) return;
   const results = JSON.parse(localStorage.getItem('asr_results') || '[]');
   const name = row?.querySelector('.name')?.textContent || data.filename || data.file_id;
   results.unshift({
@@ -439,16 +442,10 @@ function renderLiveWords(words, data) {
     return;
   }
 
-  // Re-render all accumulated words
+  // Render as flowing text instead of individual word spans
   body.innerHTML = '';
-  const frag = document.createDocumentFragment();
-  words.forEach(w => {
-    const span = document.createElement('span');
-    span.className = 'word';
-    span.textContent = w.word;
-    frag.appendChild(span);
-  });
-  body.appendChild(frag);
+  const text = words.map(w => w.word).join('');
+  body.textContent = text;
   body.scrollTop = body.scrollHeight;
 
   document.getElementById('liveStatus').textContent =

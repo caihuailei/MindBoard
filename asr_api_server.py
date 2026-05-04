@@ -12,8 +12,8 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 from config import settings
 import torch
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse, RedirectResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
@@ -37,9 +37,16 @@ TEMP_DIR.mkdir(exist_ok=True)
 RESULTS_DIR = BASE_DIR / settings.results_dir
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# ============ nanobot 记忆管家 ============
+from nanobot_manager import NanobotManager
+NANOBOT_PORT = 18900
+NANOBOT_ENABLED_PATH = BASE_DIR / "nanobot_enabled.json"
+nanobot_mgr = NanobotManager(port=NANOBOT_PORT)
+
+
 @asynccontextmanager
 async def _lifespan(app):
-    """启动时清理残留 chunk、创建目录、启动定时清理"""
+    """启动时清理残留 chunk、创建目录、启动定时清理、可选启动 nanobot"""
     logger.info(f"Temp dir: {TEMP_DIR}")
     logger.info(f"Results dir: {RESULTS_DIR}")
 
@@ -55,7 +62,24 @@ async def _lifespan(app):
 
     output_dir = BASE_DIR / settings.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Auto-start nanobot if enabled
+    if NANOBOT_ENABLED_PATH.exists():
+        try:
+            nb_cfg = json.loads(NANOBOT_ENABLED_PATH.read_text(encoding="utf-8"))
+            if nb_cfg.get("enabled"):
+                ok, msg = nanobot_mgr.start(llm_config_path=BASE_DIR / "llm_config.json")
+                if ok:
+                    logger.info(f"nanobot: {msg}")
+                else:
+                    logger.warning(f"nanobot auto-start failed: {msg}")
+        except Exception as e:
+            logger.warning(f"nanobot auto-start error: {e}")
+
     cleanup_task = asyncio.create_task(_cleanup_old_progress())
+    # Store event loop reference for thread-safe WS broadcasts
+    global _event_loop
+    _event_loop = asyncio.get_running_loop()
     yield
     cleanup_task.cancel()
     try:
@@ -63,13 +87,37 @@ async def _lifespan(app):
     except asyncio.CancelledError:
         pass
 
+    # Stop nanobot on shutdown
+    if nanobot_mgr.is_running():
+        nanobot_mgr.stop()
+        logger.info("nanobot stopped on shutdown")
+
 app = FastAPI(title="ASR API 服务", version="2.0", lifespan=_lifespan)
 model: Optional[Qwen3ASRModel] = None
 
 # ============ 转写进度追踪 ============
 import threading
 _progress_lock = threading.Lock()
-_transcription_progress: dict = {}  # file_id -> {"status": str, "words": list, "chunks_done": int, "total_duration": float}
+_transcription_progress: dict = {}
+
+# Reference to running event loop for thread-safe WS broadcasts
+_event_loop: Optional[asyncio.AbstractEventLoop] = None
+
+def _broadcast_job_event(event_type: str, **kwargs):
+    """Thread-safe bridge: broadcast job events to WebSocket clients."""
+    global _event_loop
+    loop = _event_loop
+    if loop is None:
+        logger.warning(f"WS broadcast skipped: no event loop (event={event_type})")
+        return
+    if not loop.is_running():
+        logger.warning(f"WS broadcast skipped: loop not running (event={event_type})")
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(manager.broadcast({"type": event_type, **kwargs}), loop)
+        logger.info(f"WS broadcast: {event_type} job_id={kwargs.get('job_id', '?')}")
+    except Exception as e:
+        logger.error(f"WS broadcast error: {e}")
 
 
 def _update_progress(file_id: str, **kwargs):
@@ -229,6 +277,67 @@ async def health():
     }
 
 
+@app.get("/system_metrics")
+async def system_metrics():
+    """获取系统硬件指标：CPU、内存、GPU"""
+    import psutil
+
+    # CPU
+    cpu_percent = psutil.cpu_percent(interval=0)
+    cpu_count = psutil.cpu_count(logical=True)
+
+    # Memory
+    mem = psutil.virtual_memory()
+    mem_used_gb = mem.used / (1024 ** 3)
+    mem_total_gb = mem.total / (1024 ** 3)
+    mem_percent = mem.percent
+
+    # Process-specific memory
+    proc = psutil.Process(os.getpid())
+    proc_mem_mb = proc.memory_info().rss / (1024 * 1024)
+
+    # GPU (discrete, not integrated)
+    gpu_info = None
+    if torch.cuda.is_available():
+        gpu_idx = 0
+        gpu_name = torch.cuda.get_device_name(gpu_idx)
+        props = torch.cuda.get_device_properties(gpu_idx)
+        gpu_mem_used = torch.cuda.memory_allocated(gpu_idx) / (1024 ** 2)
+        gpu_mem_reserved = torch.cuda.memory_reserved(gpu_idx) / (1024 ** 2)
+        gpu_mem_total = props.total_memory / (1024 ** 2)
+        # Try to get GPU utilization via pynvml or nvidia-smi
+        gpu_util = None
+        gpu_temp = None
+        try:
+            import subprocess
+            nvsmi = subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits", f"-i={gpu_idx}"],
+                capture_output=True, text=True, timeout=5
+            )
+            if nvsmi.returncode == 0:
+                parts = nvsmi.stdout.strip().split(",")
+                gpu_util = int(parts[0].strip())
+                gpu_temp = int(parts[1].strip())
+        except Exception:
+            pass
+
+        gpu_info = {
+            "name": gpu_name,
+            "utilization": gpu_util,  # percent
+            "temperature": gpu_temp,  # Celsius
+            "memory_used_mb": round(gpu_mem_used),
+            "memory_reserved_mb": round(gpu_mem_reserved),
+            "memory_total_mb": round(gpu_mem_total),
+        }
+
+    return {
+        "cpu": {"percent": cpu_percent, "logical_cores": cpu_count},
+        "memory": {"used_gb": round(mem_used_gb, 1), "total_gb": round(mem_total_gb, 1), "percent": mem_percent},
+        "process": {"memory_mb": round(proc_mem_mb, 1)},
+        "gpu": gpu_info,
+    }
+
+
 # ============ AI Agent / 开发者指南（已迁移到 SPA /#guide）============
 
 
@@ -236,6 +345,12 @@ async def health():
 async def root():
     """SPA 首页"""
     return HTMLResponse((BASE_DIR / "frontend" / "index.html").read_text(encoding="utf-8"))
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    """Empty favicon to suppress 404"""
+    return PlainTextResponse("", media_type="image/x-icon")
 
 
 @app.get("/guide")
@@ -366,7 +481,9 @@ def transcribe(
     """
     mdl = load_model()
     file_id = str(uuid.uuid4())[:8]
-    _update_progress(file_id, status="uploaded")
+    _update_progress(file_id, status="uploaded", filename=file.filename or "unknown")
+    _broadcast_job_event("job:started", job_id=file_id, filename=file.filename or "unknown",
+                         type="transcribe", source="sync")
     ext = Path(file.filename).suffix.lower() if file.filename else ".wav"
     input_path = TEMP_DIR / f"{file_id}{ext}"
     with open(input_path, "wb") as f:
@@ -386,6 +503,8 @@ def _transcribe_file(mdl, file_id, input_path, ext, language, context, max_chars
     try:
         audio_input = input_path
         if ext in video_exts:
+            _broadcast_job_event("job:progress", job_id=file_id, progress=10,
+                                 step="提取音频…")
             wav_path = str(Path(input_path).with_suffix(".wav"))
             extract_audio(input_path, wav_path)
             audio_input = wav_path
@@ -401,30 +520,53 @@ def _transcribe_file(mdl, file_id, input_path, ext, language, context, max_chars
         all_words_in_mem = []  # 用于前端实时轮询（最近200词）
         total_duration = 0.0
         chunk_index = 0
-        for chunk in gen:
-            chunk_index += 1
-            total_duration = max(total_duration, chunk.offset_sec + chunk.duration_sec)
-            chunk_words = []
-            if chunk.time_stamps:
-                for item in chunk.time_stamps.items:
-                    w = {"start": item.start_time, "end": item.end_time, "word": item.text}
-                    all_words_in_mem.append(w)
-                    chunk_words.append(w)
+        last_broadcast = 0.0
+        logger.info(f"Starting streaming transcription for {file_id}")
+        try:
+            for chunk in gen:
+                chunk_index += 1
+                total_duration = max(total_duration, chunk.offset_sec + chunk.duration_sec)
+                logger.info(f"  Chunk {chunk_index}: offset={chunk.offset_sec:.1f}s, dur={chunk.duration_sec:.1f}s, text='{(chunk.text or '')[:50]}', has_ts={chunk.time_stamps is not None}")
+                chunk_words = []
+                if chunk.time_stamps:
+                    for item in chunk.time_stamps.items:
+                        w = {"start": item.start_time, "end": item.end_time, "word": item.text}
+                        all_words_in_mem.append(w)
+                        chunk_words.append(w)
 
-            # 分块结果写入磁盘
-            if chunk_words:
-                cf = RESULTS_DIR / f"{file_id}_chunk_{chunk_index:04d}.json"
-                json.dump(chunk_words, open(cf, "w", encoding="utf-8"), ensure_ascii=False)
+                # 分块结果写入磁盘
+                if chunk_words:
+                    cf = RESULTS_DIR / f"{file_id}_chunk_{chunk_index:04d}.json"
+                    json.dump(chunk_words, open(cf, "w", encoding="utf-8"), ensure_ascii=False)
+                    logger.info(f"  Wrote {len(chunk_words)} words to {cf.name}")
+                else:
+                    logger.info(f"  Chunk {chunk_index}: no timestamp words")
 
-            _update_progress(file_id,
-                             status="transcribing",
-                             chunks_done=chunk_index,
-                             total_duration=total_duration,
-                             words=list(all_words_in_mem[-200:]))
+                _update_progress(file_id,
+                                 status="transcribing",
+                                 chunks_done=chunk_index,
+                                 total_duration=total_duration,
+                                 words=list(all_words_in_mem[-200:]))
+
+                # Throttle WS progress events to ~1s intervals
+                now = time.time()
+                if now - last_broadcast > 1.0:
+                    pct = min(90, 15 + int(total_duration / 720))
+                    _broadcast_job_event("job:progress", job_id=file_id, progress=pct,
+                                         step=f"转写中 ({chunk_index} 块, {total_duration:.0f}s)")
+                    last_broadcast = now
+        except StopIteration:
+            logger.info(f"  Generator exhausted naturally after {chunk_index} chunks")
+        except Exception as e:
+            logger.exception(f"  Chunk iteration error after {chunk_index} chunks: {e}")
+            raise
 
         # 从磁盘读取所有分块用于合并
         _update_progress(file_id, status="merging", chunks_done=chunk_index, total_duration=total_duration)
+        _broadcast_job_event("job:progress", job_id=file_id, progress=92, step="合并段落…")
+        logger.info(f"Transcription complete for {file_id}: {chunk_index} chunks, {total_duration:.1f}s audio")
         chunk_files = sorted(RESULTS_DIR.glob(f"{file_id}_chunk_*.json"))
+        logger.info(f"Found {len(chunk_files)} chunk files on disk for {file_id}")
         all_words_from_disk = []
         for cf in chunk_files:
             try:
@@ -459,6 +601,8 @@ def _transcribe_file(mdl, file_id, input_path, ext, language, context, max_chars
         _update_progress(file_id, status="completed", full_text=full_text, segments=segments,
                          words=all_words_from_disk, duration_sec=round(total_duration, 2),
                          language=language)
+        _broadcast_job_event("job:completed", job_id=file_id, filename=filename,
+                             type="transcribe", duration_sec=round(total_duration, 2))
 
         return {
             "success": True,
@@ -472,6 +616,8 @@ def _transcribe_file(mdl, file_id, input_path, ext, language, context, max_chars
 
     except Exception as e:
         _update_progress(file_id, status="error")
+        _broadcast_job_event("job:failed", job_id=file_id, error=str(e),
+                             filename=_transcription_progress.get(file_id, {}).get("filename", "unknown"))
         logger.exception(f"Transcription error for file_id={file_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -1008,6 +1154,97 @@ async def refine_stream(
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# ============ AI 分析 ============
+
+# 内置分析提示词模板（key 对应前端 mode 参数）
+ANALYSIS_PROMPTS = {
+    "summarize": """你是一名专业的会议纪要助手。请对以下文本进行结构化摘要。严格按照以下格式输出，不要输出任何多余内容。
+
+## 核心摘要
+用 1-2 句话概括主要内容。
+
+## 关键议题
+按主题分类，列出讨论要点（每个要点不超过 50 字）。
+
+## 待办事项/结论
+列出明确的行动项或已做出的决定。如无，写 "N/A"。
+
+## 其他备注
+情绪、争议点、需要关注的细节。如无，写 "N/A"。
+
+要求：用中文输出，不要废话和客套话。""",
+
+    "code-review": """请对以下代码进行严格审查。
+
+## 代码概况
+- 语言/框架:
+- 主要功能:
+
+## 发现的问题（按严重程度排序，最多 5 个）
+### [严重/中/低] 问题标题
+- 位置:
+- 原因:
+- 建议修复:
+
+## 改进建议（最多 3 条）
+
+要求：用中文，问题必须具体。""",
+
+    "security": """请对以下代码进行安全审计。
+
+## 漏洞清单（按严重程度排序）
+### [严重/高/中/低] 漏洞名称
+- 类型: (注入/信息泄露/DoS/权限绕过/其他)
+- 攻击场景:
+- 修复代码:
+
+要求：用中文，每个漏洞必须有修复代码或具体建议。""",
+
+    "extract": """请从以下文本中提取关键信息。
+
+## 核心要点
+- 列出最重要的事实和数据
+
+## 实体/名词
+- 人名、组织、技术、工具等
+
+## 时间线
+- 按时间顺序排列的事件或决定
+
+## 行动项
+- 具体的任务或后续步骤
+
+要求：用中文，简洁准确。""",
+}
+
+
+@app.post("/ai_analyze")
+def ai_analyze(
+    text: str = Form(..., description="待分析的文本"),
+    mode: str = Form("summarize", description="分析模式: summarize, code-review, security, extract"),
+    system_prompt: str = Form("", description="自定义系统提示词（为空则使用内置模板）"),
+    api_key: str = Form(""),
+    api_url: str = Form("https://api.deepseek.com"),
+    model_name: str = Form("deepseek-v4-flash"),
+    temperature: float = Form(0.3),
+):
+    """用 LLM 对文本进行结构化分析"""
+    if not api_key:
+        raise HTTPException(status_code=400, detail="需要提供 API Key")
+
+    prompt = system_prompt.strip() if system_prompt.strip() else ANALYSIS_PROMPTS.get(mode, ANALYSIS_PROMPTS["summarize"])
+
+    response = _call_llm(api_key, api_url, model_name, prompt, text, temperature)
+
+    result = response.choices[0].message.content
+    return {
+        "success": True,
+        "result": result,
+        "mode": mode,
+        "token_usage": response.usage.total_tokens if response.usage else 0,
+    }
+
+
 @app.post("/full_pipeline")
 def full_pipeline(
     file: UploadFile = File(...),
@@ -1076,10 +1313,18 @@ def _queue_next():
             item = _processing_queue.pop(0)
         _is_processing = True
         try:
+            _broadcast_job_event("job:started", job_id=item["file_id"],
+                                 filename=item.get("filename", "unknown"), type="transcribe")
+            _broadcast_job_event("job:progress", job_id=item["file_id"], progress=5,
+                                 step="加载模型…", status="starting")
             mdl = load_model()
-            _transcribe_file(mdl, **item)
+            # Extract filename from item, don't pass as kwarg to _transcribe_file
+            item_copy = {k: v for k, v in item.items() if k != "filename"}
+            _transcribe_file(mdl, **item_copy)
         except Exception as e:
             _update_progress(item["file_id"], status="error", detail=str(e))
+            _broadcast_job_event("job:failed", job_id=item["file_id"], error=str(e),
+                                 filename=item.get("filename", "unknown"))
         finally:
             _is_processing = False
 
@@ -1102,7 +1347,8 @@ def transcribe_async(
 
     task = dict(file_id=file_id, input_path=str(input_path), ext=ext,
                 language=language, context=context,
-                max_chars=max_chars, pause_threshold=pause_threshold)
+                max_chars=max_chars, pause_threshold=pause_threshold,
+                filename=file.filename or "unknown")
 
     with _queue_lock:
         _processing_queue.append(task)
@@ -1112,6 +1358,8 @@ def transcribe_async(
             threading.Thread(target=_queue_next, daemon=True).start()
 
     _update_progress(file_id, status="queued", filename=file.filename or "unknown", source=source)
+    _broadcast_job_event("job:started", job_id=file_id, filename=file.filename or "unknown",
+                         type="transcribe", source=source)
     return {"file_id": file_id, "position": pos, "status": "queued"}
 
 
@@ -1242,6 +1490,181 @@ def set_llm_config(config: LLMConfigBody):
     return {"success": True}
 
 
+# ============ nanobot 记忆管家管理 ============
+NANOBOT_PROVIDER_PATH = BASE_DIR / "nanobot_provider.json"
+
+class NanobotConfigBody(BaseModel):
+    enabled: bool = True
+    dream_interval_h: int = 2
+
+
+class NanobotProviderBody(BaseModel):
+    api_url: str = ""
+    api_key: str = ""
+    model_name: str = "deepseek/deepseek-chat"
+    mode: str = "independent"  # "independent" | "inherit"
+
+
+@app.get("/nanobot/status")
+def nanobot_status():
+    """nanobot 运行状态"""
+    st = nanobot_mgr.get_status()
+    enabled = False
+    if NANOBOT_ENABLED_PATH.exists():
+        try:
+            enabled = json.loads(NANOBOT_ENABLED_PATH.read_text(encoding="utf-8")).get("enabled", False)
+        except Exception:
+            pass
+    return {"enabled": enabled, **st}
+
+
+@app.post("/nanobot/start")
+def nanobot_start():
+    """启动 nanobot 服务（使用独立配置或继承 ASR 配置）"""
+    # Determine which provider config to use
+    provider_path = NANOBOT_PROVIDER_PATH
+    use_independent = False
+    if provider_path.exists():
+        try:
+            p = json.loads(provider_path.read_text(encoding="utf-8"))
+            if p.get("mode") == "independent" and p.get("api_url") and p.get("api_key"):
+                use_independent = True
+        except Exception:
+            pass
+
+    if use_independent:
+        llm_path = provider_path
+    else:
+        llm_path = BASE_DIR / "llm_config.json"
+
+    ok, msg = nanobot_mgr.start(llm_config_path=llm_path)
+    if ok:
+        NANOBOT_ENABLED_PATH.write_text(
+            json.dumps({"enabled": True}, ensure_ascii=False), encoding="utf-8"
+        )
+    return {"success": ok, "message": msg}
+
+
+@app.post("/nanobot/stop")
+def nanobot_stop():
+    """停止 nanobot 服务"""
+    ok, msg = nanobot_mgr.stop()
+    if ok:
+        NANOBOT_ENABLED_PATH.write_text(
+            json.dumps({"enabled": False}, ensure_ascii=False), encoding="utf-8"
+        )
+    return {"success": ok, "message": msg}
+
+
+@app.get("/nanobot/config")
+def get_nanobot_config():
+    """获取 nanobot 配置"""
+    enabled = False
+    dream_interval_h = 2
+    mode = "inherit"
+    if NANOBOT_ENABLED_PATH.exists():
+        try:
+            cfg = json.loads(NANOBOT_ENABLED_PATH.read_text(encoding="utf-8"))
+            enabled = cfg.get("enabled", False)
+            dream_interval_h = cfg.get("dream_interval_h", 2)
+            mode = cfg.get("mode", "inherit")
+        except Exception:
+            pass
+    return {"enabled": enabled, "dream_interval_h": dream_interval_h, "mode": mode}
+
+
+@app.post("/nanobot/config")
+def set_nanobot_config(config: NanobotConfigBody):
+    """保存 nanobot 配置（开关 + Dream 间隔）"""
+    NANOBOT_ENABLED_PATH.write_text(
+        json.dumps({"enabled": config.enabled, "dream_interval_h": config.dream_interval_h}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return {"success": True}
+
+
+@app.get("/nanobot/provider")
+def get_nanobot_provider():
+    """获取 nanobot 独立 LLM 配置"""
+    if NANOBOT_PROVIDER_PATH.exists():
+        try:
+            return json.loads(NANOBOT_PROVIDER_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"api_url": "", "api_key": "", "model_name": "deepseek/deepseek-chat", "mode": "inherit"}
+
+
+@app.post("/nanobot/provider")
+def set_nanobot_provider(config: NanobotProviderBody):
+    """保存 nanobot 独立 LLM 配置（下次启动生效）"""
+    NANOBOT_PROVIDER_PATH.write_text(
+        json.dumps(config.model_dump(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    # Update enabled state file too
+    if NANOBOT_ENABLED_PATH.exists():
+        try:
+            nb_cfg = json.loads(NANOBOT_ENABLED_PATH.read_text(encoding="utf-8"))
+            nb_cfg["mode"] = config.mode
+            NANOBOT_ENABLED_PATH.write_text(
+                json.dumps(nb_cfg, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:
+            pass
+    return {"success": True, "message": "已保存，下次启动生效"}
+
+
+@app.get("/nanobot/memory/{filename}")
+def get_nanobot_memory_file(filename: str):
+    """读取 nanobot workspace 中的记忆文件（SOUL.md, USER.md, MEMORY.md）"""
+    import html
+    path = nanobot_mgr.workspace / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"记忆文件不存在: {filename}")
+    # 安全检查：防止路径穿越
+    if not str(path.resolve()).startswith(str(nanobot_mgr.workspace.resolve())):
+        raise HTTPException(status_code=403, detail="不允许访问 workspace 外的文件")
+    return {"content": path.read_text(encoding="utf-8")}
+
+
+@app.post("/nanobot/memory/{filename}/reset")
+def reset_nanobot_memory_file(filename: str):
+    """重置记忆文件为默认内容"""
+    from nanobot_manager import SOUL_MD, USER_MD, MEMORY_MD
+    defaults = {"SOUL.md": SOUL_MD, "USER.md": USER_MD, "MEMORY.md": MEMORY_MD}
+    if filename not in defaults:
+        raise HTTPException(status_code=400, detail=f"不支持重置的文件: {filename}")
+    path = nanobot_mgr.workspace / filename
+    path.write_text(defaults[filename], encoding="utf-8")
+    return {"success": True}
+
+
+ALLOWED_WORKSPACE_FILES = [
+    "SOUL.md", "USER.md", "MEMORY.md", "memory/MEMORY.md",
+    "AGENTS.md", "TOOLS.md", "HEARTBEAT.md",
+]
+
+
+@app.post("/nanobot/workspace/{filename}")
+def write_nanobot_workspace_file(filename: str, content: str = Form(...)):
+    """写入 nanobot workspace 文件（SOUL.md, USER.md, MEMORY.md, AGENTS.md, TOOLS.md, HEARTBEAT.md）"""
+    if filename not in ALLOWED_WORKSPACE_FILES:
+        raise HTTPException(status_code=400, detail=f"不支持的文件: {filename}")
+    # Handle subdirectory paths like memory/MEMORY.md
+    parts = filename.split("/")
+    if len(parts) > 1:
+        path = nanobot_mgr.workspace
+        for p in parts:
+            path = path / p
+    else:
+        path = nanobot_mgr.workspace / filename
+    if not str(path.resolve()).startswith(str(nanobot_mgr.workspace.resolve())):
+        raise HTTPException(status_code=403, detail="不允许访问 workspace 外的文件")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return {"success": True, "filename": filename}
+
+
 # ============ 持久化结果查询 ============
 @app.get("/results")
 def list_results():
@@ -1272,6 +1695,22 @@ def get_result_file(file_id: str):
     if not path.exists():
         raise HTTPException(status_code=404, detail="结果不存在")
     return json.load(open(path, "r", encoding="utf-8"))
+
+
+@app.delete("/results/{file_id}")
+def delete_result(file_id: str):
+    """删除单个持久化结果（本地文件）"""
+    path = RESULTS_DIR / f"{file_id}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="结果不存在")
+    try:
+        path.unlink()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"删除失败: {e}")
+    # Also clean up progress entry
+    with _progress_lock:
+        _transcription_progress.pop(file_id, None)
+    return {"success": True, "file_id": file_id}
 
 
 # ============ 文件下载（供局域网其他机器使用）============
@@ -1348,6 +1787,7 @@ if __name__ == "__main__":
     logger.info(f"    POST /ass_summary      - ASS 字幕片段总结（AI 分析）")
     logger.info(f"    POST /refine           - LLM 润色文本（非流式）")
     logger.info(f"    POST /refine_stream    - LLM 润色文本（流式 SSE）")
+    logger.info(f"    POST /ai_analyze       - AI 结构化分析（摘要/审查/审计/提取）")
     logger.info(f"    POST /full_pipeline    - 完整流水线（ASR + LLM）")
     logger.info(f"    GET  /health           - 健康检查")
     logger.info(f"    GET  /guide            - SPA 指南")
@@ -1364,4 +1804,154 @@ if __name__ == "__main__":
     logger.info(f"    GET  /files             - 列出输出目录文件（LAN 访问）")
     logger.info(f"    GET  /download/{{filename}} - 下载输出目录文件（LAN 访问）")
     logger.info(f"    POST /llm_config       - 设置 LLM 配置（AI Agent）")
+    logger.info(f"    GET  /nanobot/status     - nanobot 运行状态")
+    logger.info(f"    POST /nanobot/start      - 启动 nanobot 服务")
+    logger.info(f"    POST /nanobot/stop       - 停止 nanobot 服务")
+    logger.info(f"    GET  /nanobot/config     - 获取 nanobot 配置")
+    logger.info(f"    POST /nanobot/config     - 保存 nanobot 配置")
+    logger.info(f"    GET  /nanobot/memory/{{filename}}    - 读取 nanobot 记忆文件")
+    logger.info(f"    POST /nanobot/memory/{{filename}}/reset - 重置记忆文件")
+import httpx
+
+# ============ WebSocket 连接管理 ============
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        data = json.dumps(message, ensure_ascii=False)
+        dead = []
+        for conn in self.active_connections:
+            try:
+                await conn.send_text(data)
+            except Exception:
+                dead.append(conn)
+        for conn in dead:
+            self.disconnect(conn)
+
+manager = ConnectionManager()
+
+
+async def _emit_job_event(event_type: str, **kwargs):
+    """广播任务状态到所有 WebSocket 连接"""
+    await manager.broadcast({"type": event_type, **kwargs})
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("type") == "ping":
+                    await websocket.send_text("pong")
+            except json.JSONDecodeError:
+                pass
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+
+@app.post("/chat")
+async def chat_proxy(request: Request):
+    """代理聊天请求到 LLM（SSE 流式），接受前端传来的 API 配置"""
+    body = await request.json()
+    messages = body.get("messages", [])
+    model_name = body.get("model", "deepseek-v4-flash")
+    temperature = body.get("temperature", 0.3)
+
+    api_url = body.get("api_url", "")
+    api_key = body.get("api_key", "")
+
+    # Priority: 1) frontend config → 2) nanobot provider → 3) llm_config.json
+    if not api_key and NANOBOT_PROVIDER_PATH.exists():
+        try:
+            p = json.loads(NANOBOT_PROVIDER_PATH.read_text(encoding="utf-8"))
+            api_url = api_url or p.get("api_url", "")
+            api_key = api_key or p.get("api_key", "")
+            model_name = model_name or p.get("model_name", "")
+        except Exception:
+            pass
+
+    if not api_key:
+        cfg = _load_llm_config()
+        api_url = api_url or cfg.get("api_url", "")
+        api_key = api_key or cfg.get("api_key", "")
+        model_name = model_name or cfg.get("model_name", "")
+
+    if not api_key:
+        raise HTTPException(status_code=503, detail="未配置 API Key，请在配置页设置 LLM 密钥")
+
+    if not api_url:
+        api_url = "https://token.sensenova.cn/v1"
+
+    target_url = f"{api_url.rstrip('/')}/chat/completions"
+
+    async def event_generator():
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            async with client.stream(
+                "POST",
+                target_url,
+                json={
+                    "model": model_name,
+                    "messages": messages,
+                    "stream": True,
+                    "temperature": temperature,
+                },
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            ) as resp:
+                # Upstream returns SSE format: "data: {...}\n\n"
+                # aiter_lines() yields complete lines without trailing newline
+                # We need to extract the JSON from "data: {json}" and re-emit
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    stripped = line.strip()
+                    if stripped.startswith("data: "):
+                        # Extract JSON from upstream SSE and re-emit
+                        yield f"{stripped}\n\n"
+                    elif stripped == "data:":
+                        # Empty data field — skip
+                        continue
+                    elif stripped.startswith("event:") or stripped.startswith("id:") or stripped.startswith("retry:"):
+                        # Other SSE fields — pass through
+                        yield f"{stripped}\n\n"
+                    else:
+                        # Unknown line (possibly [DONE] or raw JSON)
+                        if stripped == "[DONE]":
+                            continue
+                        # Try as raw JSON
+                        try:
+                            json.loads(stripped)
+                            yield f"data: {stripped}\n\n"
+                        except ValueError:
+                            pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ============ 启动 ============
+if __name__ == "__main__":
+    logger.info(f"    GET  /ws                - WebSocket 连接（实时工作流状态）")
+    logger.info(f"    POST /chat              - 聊天代理（nanobot SSE）")
     uvicorn.run(app, host=settings.api_host, port=settings.api_port)

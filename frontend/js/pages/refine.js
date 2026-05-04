@@ -4,7 +4,7 @@ import { API } from '../api.js';
 import { navigate } from '../router.js';
 
 function getActiveConfig() {
-  const activePreset = localStorage.getItem('asr_llm_config_active') || 'deepseek';
+  const activePreset = localStorage.getItem('asr_llm_config_active') || 'sensenova';
   return JSON.parse(localStorage.getItem(`asr_llm_config_${activePreset}`) || '{}');
 }
 

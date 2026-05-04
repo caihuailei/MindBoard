@@ -3,30 +3,53 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ASR API 控制台</title>
+<title>ASR Studio</title>
 <link rel="stylesheet" href="/assets/css/style.css">
+<!-- Markdown + code highlight (browser bundle, NOT CommonJS lib files) -->
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.11.1/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.11.1/build/highlight.min.js"></script>
+<!-- KaTeX for math formulas -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<!-- markdown-it + katex plugin -->
+<script src="https://cdn.jsdelivr.net/npm/markdown-it@14.0.0/dist/markdown-it.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@vscode/markdown-it-katex@1.0.3/out/index.min.js"></script>
+<script>
+if (typeof marked !== 'undefined') {
+  marked.setOptions({ breaks: true, gfm: true });
+}
+// Initialize markdown-it with KaTeX
+let md;
+if (typeof markdownit !== 'undefined' && typeof window['markdown-it-katex'] !== 'undefined') {
+  md = markdownit({ html: true, breaks: true, linkify: true }).use(window['markdown-it-katex']);
+}
+</script>
 </head>
 <body>
-<nav class="navbar" id="navbar">
-  <div class="nav-inner">
-    <a href="#/upload" class="logo">ASR API</a>
-    <div class="nav-links" id="navLinks">
-      <a href="#/upload" class="nav-item active">上传</a>
-      <a href="#/results" class="nav-item">结果</a>
-      <a href="#/ass" class="nav-item">ASS</a>
-      <a href="#/refine" class="nav-item">润色</a>
-      <a href="#/config" class="nav-item">配置</a>
-      <a href="#/health" class="nav-item">状态</a>
-      <a href="#/guide" class="nav-item">指南</a>
+<div id="app" class="app-shell">
+  <aside id="sidebar" class="sidebar"></aside>
+  <main id="main-content" class="main-content">
+    <div class="main-topbar" id="mainTopbar">
+      <div class="chat-model-select" id="chatModelSelect" title="点击切换模型">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        <span id="chatModelLabel">SenseNova</span>
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <div class="main-topbar-spacer"></div>
+      <button class="main-topbar-menu" id="mainMenuBtn" title="菜单">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <circle cx="12" cy="5" r="1" fill="currentColor"/>
+          <circle cx="12" cy="12" r="1" fill="currentColor"/>
+          <circle cx="12" cy="19" r="1" fill="currentColor"/>
+        </svg>
+      </button>
     </div>
-    <div class="nav-right">
-      <span class="health-dot" id="healthDot" title="服务器状态"></span>
-      <button class="hamburger" id="hamburger" aria-label="菜单">&#9776;</button>
-    </div>
-  </div>
-</nav>
-<main id="app" class="container"></main>
+    <div id="route-content" class="route-content"></div>
+  </main>
+  <aside id="right-panel" class="right-panel"></aside>
+</div>
 <div id="toast-container"></div>
-<script type="module" src="/assets/js/app.js"></script>
+<script type="module" src="/assets/js/app.js?v=20260504fix7"></script>
 </body>
 </html>

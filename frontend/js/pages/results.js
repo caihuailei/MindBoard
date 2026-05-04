@@ -23,9 +23,20 @@ export function init() {
 
   document.getElementById('clearResultsBtn').addEventListener('click', () => {
     if (confirm('确定清空所有转写结果？')) {
-      localStorage.setItem('asr_results', '[]');
-      renderResults();
-      toast('已清空', 'info');
+      // Delete all server results too
+      const local = JSON.parse(localStorage.getItem('asr_results') || '[]');
+      // Track all as deleted
+      const deletedIds = new Set(JSON.parse(localStorage.getItem('asr_deleted_ids') || '[]'));
+      const deletes = local.map(r => r.id).filter(Boolean).map(id => {
+        deletedIds.add(id);
+        return API.deleteResult(id).catch(() => {});
+      });
+      localStorage.setItem('asr_deleted_ids', JSON.stringify([...deletedIds]));
+      Promise.allSettled(deletes).then(() => {
+        localStorage.setItem('asr_results', '[]');
+        renderResults();
+        toast('已清空', 'info');
+      });
     }
   });
 }
@@ -35,10 +46,12 @@ async function mergeServerResults() {
     const server = await API.listResults();
     const local = JSON.parse(localStorage.getItem('asr_results') || '[]');
     const localIds = new Set(local.map(r => r.id));
+    // Track IDs the user explicitly deleted — don't re-fetch them
+    const deletedIds = new Set(JSON.parse(localStorage.getItem('asr_deleted_ids') || '[]'));
 
     let added = 0;
     for (const item of server.results || []) {
-      if (!localIds.has(item.id) && item.text_length > 0) {
+      if (!localIds.has(item.id) && !deletedIds.has(item.id) && item.text_length > 0) {
         // Fetch full detail
         try {
           const detail = await API.getResult(item.id);
@@ -144,6 +157,14 @@ function renderResults() {
             break;
           case 'delete':
             if (confirm('删除这条结果？')) {
+              // Also delete from server
+              if (r.id) {
+                API.deleteResult(r.id).catch(() => {});
+                // Track as deleted so mergeServerResults won't re-fetch it
+                const deletedIds = new Set(JSON.parse(localStorage.getItem('asr_deleted_ids') || '[]'));
+                deletedIds.add(r.id);
+                localStorage.setItem('asr_deleted_ids', JSON.stringify([...deletedIds]));
+              }
               const list = JSON.parse(localStorage.getItem('asr_results') || '[]');
               list.splice(idx, 1);
               localStorage.setItem('asr_results', JSON.stringify(list));

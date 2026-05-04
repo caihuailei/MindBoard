@@ -1,25 +1,53 @@
-# Secrets
+# Secrets & config
 .env
+llm_config.json
+nanobot_enabled.json
+nanobot_provider.json
 
-# Temp and generated
+# Models (large files)
+models/
+
+# Generated data
 output/
 results/
 temp/
-project_for_chatgpt.md
-project_source.zip
+
+# Python
 __pycache__/
 *.pyc
+*.egg-info/
+*.egg
+
+# Claude / AI tools
+.claude/
+CLAUDE.md
+.superpowers/
+.gitnexus/
+.graphify_*
+graphify-out/
+AGENTS.md
+
+# Nanobot
+.nanobot-workspace/
+
+# Reference / third-party source
+qwen_asr_source/
+reference/
+opencli-deepseek/
 
 # IDE
 .vscode/
 .idea/
 
-# Superpowers
-.superpowers/
-docs/
+# Personal / misc
+test_pipeline.py
+*.md
+project_for_chatgpt.md
+project_source.zip
 
-# Models (large files)
-models/
-
-# Frontend assets
+# Frontend
 frontend/bg.jpg
+
+# Keep only this file
+!.gitignore
+!README.md
