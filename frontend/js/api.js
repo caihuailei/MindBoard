@@ -344,6 +344,64 @@ export const API = {
     const r = await req(`/nanobot/memory/${encodeURIComponent(filename)}`);
     return r.json();
   },
+
+  // nanobot tutor management
+  async nanobotListTutors() {
+    const r = await req('/nanobot/tutors');
+    return r.json();
+  },
+
+  async nanobotGetTutorSoul(name) {
+    const r = await req(`/nanobot/tutors/${encodeURIComponent(name)}/soul`);
+    return r.json();
+  },
+
+  async nanobotSetTutorSoul(name, soul) {
+    const r = await req(`/nanobot/tutors/${encodeURIComponent(name)}/soul`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ soul }),
+    });
+    return r.json();
+  },
+
+  async nanobotGetTutorKnowledge(name) {
+    const r = await req(`/nanobot/tutors/${encodeURIComponent(name)}/knowledge`);
+    return r.json();
+  },
+
+  async nanobotSetTutorKnowledge(name, knowledge) {
+    const r = await req(`/nanobot/tutors/${encodeURIComponent(name)}/knowledge`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ knowledge }),
+    });
+    return r.json();
+  },
+
+  async nanobotCreateTutor(name, soul = '', knowledge = '') {
+    const r = await req('/nanobot/tutors', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, soul, knowledge }),
+    });
+    return r.json();
+  },
+
+  // Obsidian knowledge base sync
+  async obsidianSync(obsidianPath, classifyWithLlm = true) {
+    const r = await req('/nanobot/obsidian/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ obsidian_path: obsidianPath, classify_with_llm: classifyWithLlm }),
+    });
+    return r.json();
+  },
+
+  async obsidianStatus() {
+    const r = await req('/nanobot/obsidian/status');
+    return r.json();
+  },
 };
 
 // ── WebSocket Client ──

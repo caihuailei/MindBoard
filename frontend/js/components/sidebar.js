@@ -90,18 +90,8 @@ function render() {
     }
     refreshSessionsFromStore();
 
-    const hash = window.location.hash.slice(1);
-    if (hash === '/chat' || hash.startsWith('/chat')) {
-      // Already on chat page — force re-render (hashchange won't fire)
-      const chatMod = await import('../pages/chat.js');
-      const target = document.getElementById('route-content') || document.getElementById('main-content');
-      if (target) {
-        target.innerHTML = chatMod.render ? chatMod.render() : '<p>页面加载中...</p>';
-        if (typeof chatMod.init === 'function') chatMod.init();
-      }
-    } else {
-      if (callbacks.onNav) callbacks.onNav('/chat');
-    }
+    // Always delegate to router — router handles hashchange and re-render cleanly
+    if (callbacks.onNav) callbacks.onNav('/chat');
   });
 
   // Event delegation on session list — survives DOM re-renders
@@ -266,6 +256,7 @@ function expandIcon()  { return svg('<polyline points="13 17 18 12 13 7"/><polyl
 
 // ── Theme ──
 function getCurrentTheme() {
+  if (document.documentElement.classList.contains('warm-paper')) return 'warm-paper';
   if (document.documentElement.classList.contains('theme-glass')) return 'theme-glass';
   if (document.documentElement.classList.contains('theme-snow')) return 'theme-snow';
   if (document.documentElement.classList.contains('dark')) return 'dark';
@@ -274,7 +265,7 @@ function getCurrentTheme() {
 
 function applyTheme(key) {
   const html = document.documentElement;
-  html.classList.remove('dark', 'theme-snow', 'theme-glass');
+  html.classList.remove('dark', 'theme-snow', 'theme-glass', 'warm-paper');
   if (key) html.classList.add(key);
   localStorage.setItem('asr-theme', key);
 }
@@ -285,6 +276,8 @@ function openSettingsModal() {
   const userAvatar = localStorage.getItem('user-avatar') || '';
   const aiAvatar = localStorage.getItem('ai-avatar') || '';
   const currentTheme = getCurrentTheme();
+  const pendingAvatars = { user: '', ai: '' };
+  let activeTab = 'appearance';
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
@@ -295,61 +288,189 @@ function openSettingsModal() {
         <h3 style="margin:0">用户设置</h3>
         <button class="settings-close-btn" id="settingsClose">&times;</button>
       </div>
-      <div class="settings-modal-body">
-        <!-- Theme -->
-        <div class="settings-section">
-          <label class="settings-label">主题</label>
-          <div class="theme-options">
-            <button class="theme-option ${currentTheme === '' ? 'active' : ''}" data-theme="">
-              <span class="theme-swatch" style="background:#faf9f6;border:1px solid #dbd4c8"></span>
-              <span>暖白</span>
-            </button>
-            <button class="theme-option ${currentTheme === 'dark' ? 'active' : ''}" data-theme="dark">
-              <span class="theme-swatch" style="background:#141312;border:1px solid #2e2b28"></span>
-              <span>深色</span>
-            </button>
-            <button class="theme-option ${currentTheme === 'theme-snow' ? 'active' : ''}" data-theme="theme-snow">
-              <span class="theme-swatch" style="background:#f8fafc;border:1px solid #cbd5e1"></span>
-              <span>雪白</span>
-            </button>
-            <button class="theme-option ${currentTheme === 'theme-glass' ? 'active' : ''}" data-theme="theme-glass">
-              <span class="theme-swatch" style="background:#0a0a0a;border:1px solid rgba(255,255,255,0.2)"></span>
-              <span>毛玻璃</span>
-            </button>
-          </div>
-        </div>
+      <div class="settings-body">
+        <!-- Left Nav -->
+        <nav class="settings-nav" id="settingsNav">
+          <button class="settings-nav-item active" data-tab="appearance">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+            外观
+          </button>
+          <button class="settings-nav-item" data-tab="avatars">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            头像
+          </button>
+          <button class="settings-nav-item" data-tab="hooks">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+            钩子
+          </button>
+          <button class="settings-nav-item" data-tab="skills">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+            技能
+          </button>
+          <button class="settings-nav-item" data-tab="about">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            关于
+          </button>
+        </nav>
 
-        <!-- User Avatar -->
-        <div class="settings-section">
-          <label class="settings-label">我的头像</label>
-          <div class="avatar-input-row">
-            <div class="avatar avatar-preview" id="userAvatarPreview">
-              ${userAvatar ? `<img src="${userAvatar}" alt="">` : '我'}
-            </div>
-            <div class="avatar-input-actions">
-              <input type="file" id="userAvatarFile" accept="image/*" style="display:none">
-              <button class="btn btn-sm btn-secondary" id="userAvatarBtn">选择图片</button>
-              ${userAvatar && userAvatar.startsWith('data:') ? '<span class="text-sm text-dim">已上传本地图片</span>' : ''}
+        <!-- Right Content -->
+        <div class="settings-content">
+          <!-- Appearance Panel -->
+          <div class="settings-panel active" id="panel-appearance">
+            <div class="settings-section">
+              <div class="settings-section-title">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+                主题
+              </div>
+              <div class="theme-options">
+                <button class="theme-option ${currentTheme === '' ? 'active' : ''}" data-theme="">
+                  <span class="theme-swatch" style="background:#faf9f6;border:1px solid #dbd4c8"></span>
+                  <span>暖白</span>
+                </button>
+                <button class="theme-option ${currentTheme === 'dark' ? 'active' : ''}" data-theme="dark">
+                  <span class="theme-swatch" style="background:#141312;border:1px solid #2e2b28"></span>
+                  <span>深色</span>
+                </button>
+                <button class="theme-option ${currentTheme === 'theme-snow' ? 'active' : ''}" data-theme="theme-snow">
+                  <span class="theme-swatch" style="background:#f8fafc;border:1px solid #cbd5e1"></span>
+                  <span>雪白</span>
+                </button>
+                <button class="theme-option ${currentTheme === 'theme-glass' ? 'active' : ''}" data-theme="theme-glass">
+                  <span class="theme-swatch" style="background:#0a0a0a;border:1px solid rgba(255,255,255,0.2)"></span>
+                  <span>毛玻璃</span>
+                </button>
+                <button class="theme-option ${currentTheme === 'warm-paper' ? 'active' : ''}" data-theme="warm-paper">
+                  <span class="theme-swatch" style="background:#F5EFE4;border:1px solid #D8CFBE"></span>
+                  <span>暖纸</span>
+                </button>
+              </div>
             </div>
           </div>
-        </div>
 
-        <!-- AI Avatar -->
-        <div class="settings-section">
-          <label class="settings-label">AI 头像</label>
-          <div class="avatar-input-row">
-            <div class="avatar avatar-preview avatar--primary" id="aiAvatarPreview">
-              ${aiAvatar ? `<img src="${aiAvatar}" alt="">` : 'AI'}
+          <!-- Avatars Panel -->
+          <div class="settings-panel" id="panel-avatars">
+            <div class="settings-section">
+              <div class="settings-section-title">我的头像</div>
+              <div class="avatar-input-row">
+                <div class="avatar-upload-wrap" id="userAvatarUpload">
+                  <div class="avatar avatar-preview" id="userAvatarPreview">
+                    ${userAvatar ? `<img src="${userAvatar}" alt="">` : '我'}
+                  </div>
+                  <div class="avatar-upload-overlay">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                  </div>
+                </div>
+                <div class="avatar-input-actions" style="flex:1">
+                  <input type="file" id="userAvatarFile" accept="image/*" style="display:none">
+                  <div style="flex:1">
+                    <div class="settings-hint">${userAvatar && userAvatar.startsWith('data:') ? '已上传本地图片' : '点击左侧头像更换'}</div>
+                  </div>
+                </div>
+              </div>
             </div>
-            <div class="avatar-input-actions">
-              <input type="file" id="aiAvatarFile" accept="image/*" style="display:none">
-              <button class="btn btn-sm btn-secondary" id="aiAvatarBtn">选择图片</button>
-              ${aiAvatar && aiAvatar.startsWith('data:') ? '<span class="text-sm text-dim">已上传本地图片</span>' : ''}
+
+            <div class="settings-section">
+              <div class="settings-section-title">AI 头像</div>
+              <div class="avatar-input-row">
+                <div class="avatar-upload-wrap" id="aiAvatarUpload">
+                  <div class="avatar avatar-preview avatar--primary" id="aiAvatarPreview">
+                    ${aiAvatar ? `<img src="${aiAvatar}" alt="">` : 'AI'}
+                  </div>
+                  <div class="avatar-upload-overlay">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                  </div>
+                </div>
+                <div class="avatar-input-actions" style="flex:1">
+                  <input type="file" id="aiAvatarFile" accept="image/*" style="display:none">
+                  <div style="flex:1">
+                    <div class="settings-hint">${aiAvatar && aiAvatar.startsWith('data:') ? '已上传本地图片' : '点击左侧头像更换'}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Hooks Panel -->
+          <div class="settings-panel" id="panel-hooks">
+            <div class="settings-section">
+              <div class="settings-section-title">已注册的钩子</div>
+              <div id="hooksList">
+                <div class="hook-card">
+                  <div>
+                    <div class="hook-name">消息后处理</div>
+                    <div class="hook-desc">在收到 AI 回复后自动提取关键信息</div>
+                  </div>
+                  <button class="hana-toggle on" data-hook="postMessage"></button>
+                </div>
+                <div class="hook-card">
+                  <div>
+                    <div class="hook-name">输入预处理</div>
+                    <div class="hook-desc">发送前自动格式化用户输入</div>
+                  </div>
+                  <button class="hana-toggle" data-hook="preInput"></button>
+                </div>
+              </div>
+              <div class="settings-hint" style="margin-top:12px">钩子功能需要后端 API 支持，当前为 UI 占位。</div>
+            </div>
+          </div>
+
+          <!-- Skills Panel -->
+          <div class="settings-panel" id="panel-skills">
+            <div class="settings-section">
+              <div class="settings-section-title">可用技能</div>
+              <div id="skillsList">
+                <div class="skill-card">
+                  <div>
+                    <div class="skill-name">文本润色</div>
+                    <div class="skill-desc">优化文字表达，提升可读性</div>
+                  </div>
+                  <button class="hana-toggle on" data-skill="refine"></button>
+                </div>
+                <div class="skill-card">
+                  <div>
+                    <div class="skill-name">内容摘要</div>
+                    <div class="skill-desc">提取核心要点，生成简洁摘要</div>
+                  </div>
+                  <button class="hana-toggle on" data-skill="summarize"></button>
+                </div>
+                <div class="skill-card">
+                  <div>
+                    <div class="skill-name">翻译</div>
+                    <div class="skill-desc">多语言互译，保持语义准确</div>
+                  </div>
+                  <button class="hana-toggle on" data-skill="translate"></button>
+                </div>
+                <div class="skill-card">
+                  <div>
+                    <div class="skill-name">代码分析</div>
+                    <div class="skill-desc">审查代码逻辑，发现潜在问题</div>
+                  </div>
+                  <button class="hana-toggle" data-skill="codeReview"></button>
+                </div>
+              </div>
+              <div class="settings-hint" style="margin-top:12px">技能可通过后端 API 动态安装，当前为预设列表。</div>
+            </div>
+          </div>
+
+          <!-- About Panel -->
+          <div class="settings-panel" id="panel-about">
+            <div class="settings-section">
+              <div class="about-version">ASR Studio v0.125</div>
+              <div class="settings-hint">基于 ASR 语音识别的多模态工作台</div>
+            </div>
+            <div class="settings-section">
+              <div class="settings-section-title">快捷键</div>
+              <div class="about-shortcut"><span>发送消息</span><kbd>Enter</kbd></div>
+              <div class="about-shortcut"><span>换行</span><kbd>Shift + Enter</kbd></div>
+              <div class="about-shortcut"><span>停止生成</span><kbd>Escape</kbd></div>
+              <div class="about-shortcut"><span>关闭弹窗</span><kbd>Escape</kbd></div>
+              <div class="about-shortcut"><span>新对话</span><kbd>Ctrl + N</kbd></div>
             </div>
           </div>
         </div>
       </div>
-      <div class="modal-actions">
+
+      <div class="settings-modal-footer">
         <button class="btn btn-secondary" id="settingsReset">恢复默认</button>
         <button class="btn btn-primary" id="settingsSave">保存</button>
       </div>
@@ -364,6 +485,17 @@ function openSettingsModal() {
     if (e.target === overlay) closeSettingsModal();
   });
 
+  // Tab navigation
+  overlay.querySelectorAll('.settings-nav-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeTab = btn.dataset.tab;
+      overlay.querySelectorAll('.settings-nav-item').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      overlay.querySelectorAll('.settings-panel').forEach(p => p.classList.remove('active'));
+      overlay.querySelector(`#panel-${activeTab}`)?.classList.add('active');
+    });
+  });
+
   // Theme switch
   overlay.querySelectorAll('.theme-option').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -373,10 +505,8 @@ function openSettingsModal() {
     });
   });
 
-  // File picker for avatars — read as base64 data URL
-  const pendingAvatars = { user: '', ai: '' };
-
-  overlay.querySelector('#userAvatarBtn')?.addEventListener('click', () => {
+  // Avatar file pickers with camera hover
+  overlay.querySelector('#userAvatarUpload')?.addEventListener('click', () => {
     overlay.querySelector('#userAvatarFile')?.click();
   });
 
@@ -387,11 +517,13 @@ function openSettingsModal() {
     reader.onload = (ev) => {
       pendingAvatars.user = ev.target.result;
       overlay.querySelector('#userAvatarPreview').innerHTML = `<img src="${ev.target.result}" alt="">`;
+      const hintEl = overlay.querySelector('#userAvatarUpload').closest('.settings-section').querySelector('.settings-hint');
+      if (hintEl) hintEl.textContent = '已上传本地图片';
     };
     reader.readAsDataURL(file);
   });
 
-  overlay.querySelector('#aiAvatarBtn')?.addEventListener('click', () => {
+  overlay.querySelector('#aiAvatarUpload')?.addEventListener('click', () => {
     overlay.querySelector('#aiAvatarFile')?.click();
   });
 
@@ -402,8 +534,17 @@ function openSettingsModal() {
     reader.onload = (ev) => {
       pendingAvatars.ai = ev.target.result;
       overlay.querySelector('#aiAvatarPreview').innerHTML = `<img src="${ev.target.result}" alt="">`;
+      const hintEl = overlay.querySelector('#aiAvatarUpload').closest('.settings-section').querySelector('.settings-hint');
+      if (hintEl) hintEl.textContent = '已上传本地图片';
     };
     reader.readAsDataURL(file);
+  });
+
+  // Toggle switches
+  overlay.querySelectorAll('.hana-toggle').forEach(toggle => {
+    toggle.addEventListener('click', () => {
+      toggle.classList.toggle('on');
+    });
   });
 
   // Reset to defaults
@@ -423,9 +564,7 @@ function openSettingsModal() {
     if (ua) localStorage.setItem('user-avatar', ua); else localStorage.removeItem('user-avatar');
     if (aa) localStorage.setItem('ai-avatar', aa); else localStorage.removeItem('ai-avatar');
     closeSettingsModal();
-    // Re-render sidebar to update avatar preview
     render();
-    // Re-render chat if active to show new avatars
     const hash = window.location.hash.slice(1);
     if (hash === '/chat' || hash.startsWith('/chat')) {
       import('../pages/chat.js').then(mod => {

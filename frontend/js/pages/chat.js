@@ -24,60 +24,95 @@ const TUTORS = {
 // Context: load from transcribe_list API
 let contextFiles = [];
 
+// Tutor cache: loaded from Nanobot API, falls back to local TUTORS
+let tutorCache = {};  // { name: { soul, knowledge } }
+
 export function render() {
   const session = getActiveSession();
   if (!session) return '<div class="card"><p>会话异常，请刷新页面</p></div>';
 
   const msgs = session.messages || [];
-  const activeTutor = localStorage.getItem('asr_active_tutor') || 'general';
-  const tutorOpts = Object.entries(TUTORS).map(([k, v]) =>
-    `<option value="${k}" ${k === activeTutor ? 'selected' : ''}>${v.icon} ${v.name}</option>`
-  ).join('');
 
   // Welcome screen
+  const activeTutor = localStorage.getItem('asr_active_tutor') || 'general';
+  const tutor = TUTORS[activeTutor] || TUTORS.general;
   const welcomeHTML = msgs.length === 0 ? `
     <div class="chat-welcome">
+      <div class="chat-welcome-avatar">${tutor.icon || '🤖'}</div>
       <h2>有什么想聊的？</h2>
-      <p>我可以帮你润色文本、分析内容、回答问题</p>
+      <p class="chat-welcome-subtitle">与${tutor.name}对话</p>
       <div class="chat-suggestions">
-        <button class="suggestion-btn" data-text="帮我润色这段文本：">✨ 润色文本</button>
-        <button class="suggestion-btn" data-text="帮我总结一下：">📋 内容摘要</button>
-        <button class="suggestion-btn" data-text="这段代码有什么问题？">🔍 代码审查</button>
+        <button class="suggestion-btn" data-text="帮我润色这段文本：">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          润色文本
+        </button>
+        <button class="suggestion-btn" data-text="帮我总结一下：">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+          内容摘要
+        </button>
+        <button class="suggestion-btn" data-text="这段代码有什么问题？">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          代码审查
+        </button>
       </div>
     </div>
   ` : '';
 
-  const msgsHTML = msgs.map((m, i) => messageBubble(m, i)).join('');
+  const msgsHTML = msgs.map((m, i) => messageBubble(m, i, session)).join('');
+
+  // Context chips
+  const fileChip = pendingFileContext ? `<div class="context-chip">
+    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+    ${escCtx(pendingFileContext.name)}
+    <button class="context-chip-remove" id="ctxChipRemove">&times;</button>
+  </div>` : '';
+  const tutorChip = activeTutor !== 'general' ? `<div class="context-chip" title="当前导师">${escCtx(tutor.name)}
+    <button class="context-chip-remove" id="tutorChipRemove">&times;</button>
+  </div>` : '';
+  const contextChipsHTML = (fileChip || tutorChip) ? `<div class="context-chips">${fileChip}${tutorChip}</div>` : '';
 
   return `
     <div class="chat-page">
-      <div class="tutor-select" id="tutorSelectWrap">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-        <select id="tutorSelect">${tutorOpts}</select>
-      </div>
       ${welcomeHTML}
       <div class="chat-messages" id="chatMessages">${msgsHTML}</div>
 
       <div class="chat-composer">
+        ${contextChipsHTML}
         <!-- File preview area -->
         <div id="chatFilePreview" class="chat-file-preview hidden"></div>
         <div class="chat-composer-row">
-          <button class="chat-upload-btn" id="chatUploadBtn" title="上传文件">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          <!-- Compose menu button (plus/minus toggle) -->
+          <button class="compose-menu-btn" id="composeMenuBtn" title="上传文件 / 选择导师">
+            <span class="compose-plus">＋</span>
+            <span class="compose-minus">－</span>
           </button>
-          <input type="file" id="chatFileInput" hidden>
-          <button class="ctx-add-btn" id="ctxAddBtn" title="从历史记录添加上下文">＋</button>
           <textarea id="chatInput" rows="1" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"></textarea>
-          <button class="chat-send-btn" id="chatSendBtn" title="发送"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
+          ${isStreaming ? `<button class="chat-stop-btn" id="chatStopBtn" title="停止生成"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>` : `<button class="chat-send-btn" id="chatSendBtn" title="发送"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>`}
         </div>
         <div class="chat-composer-hint">按 Enter 发送，Shift+Enter 换行</div>
-      </div>
 
-      <!-- Context picker dropdown -->
-      <div class="ctx-picker hidden" id="ctxPicker">
-        <div class="ctx-picker-header">选择文件作为上下文</div>
-        <div id="ctxPickerList" class="ctx-picker-list">
-          <div class="ctx-picker-loading">加载中...</div>
+        <!-- Compose menu dropdown -->
+        <div class="compose-menu hidden" id="composeMenu">
+          <div class="compose-menu-section">
+            <div class="compose-menu-label">上传文件</div>
+            <div class="compose-menu-item" id="composeUpload">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+              选择文件
+            </div>
+            <input type="file" id="chatFileInput" hidden>
+          </div>
+          <div class="compose-menu-section">
+            <div class="compose-menu-label">选择导师</div>
+            <div class="compose-menu-item tutor-menu-item" data-tutor="general">
+              🤖 通用助手
+            </div>
+            <div class="compose-menu-item tutor-menu-item" data-tutor="math">
+              📐 数学导师
+            </div>
+            <div class="compose-menu-item tutor-menu-item" data-tutor="physics">
+              ⚡ 物理导师
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -88,6 +123,15 @@ export function init() {
   const session = getActiveSession();
   if (!session) return;
 
+  // Reset streaming state ONLY on session switch (prevents stale stop button
+  // after navigating away during stream, without breaking mid-send reRender)
+  if (session.id !== currentSessionId) {
+    if (abortController) abortController.abort();
+    isStreaming = false;
+    abortController = null;
+    currentStreamingEl = null;
+  }
+
   // Track session to detect switching
   currentSessionId = session.id;
   titleGenDone = session.messages.length > 2;  // if already has exchange, skip title gen
@@ -96,18 +140,49 @@ export function init() {
   const sendBtn = document.getElementById('chatSendBtn');
   const stopBtn = document.getElementById('chatStopBtn');
   const msgs = document.getElementById('chatMessages');
+  const composeBtn = document.getElementById('composeMenuBtn');
+  const composeMenu = document.getElementById('composeMenu');
 
-  // Tutor selector
-  document.getElementById('tutorSelect')?.addEventListener('change', (e) => {
-    localStorage.setItem('asr_active_tutor', e.target.value);
-    toast(`已切换至: ${TUTORS[e.target.value].name}`, 'success');
+  // ── Compose menu toggle ──
+  composeBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const hidden = composeMenu?.classList.toggle('hidden');
+    composeBtn?.classList.toggle('expanded', !hidden);
   });
 
-  // File upload
-  document.getElementById('chatUploadBtn')?.addEventListener('click', () => {
+  // ── Upload from compose menu ──
+  document.getElementById('composeUpload')?.addEventListener('click', (e) => {
+    e.stopPropagation();
     document.getElementById('chatFileInput')?.click();
   });
   document.getElementById('chatFileInput')?.addEventListener('change', handleFileUpload);
+
+  // ── Tutor selection from compose menu ──
+  // Mark active tutor on mount
+  const activeTutor = localStorage.getItem('asr_active_tutor') || 'general';
+  composeMenu?.querySelector(`.tutor-menu-item[data-tutor="${activeTutor}"]`)
+    ?.classList.add('active');
+
+  document.querySelectorAll('.tutor-menu-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const tutor = item.dataset.tutor;
+      localStorage.setItem('asr_active_tutor', tutor);
+      toast(`已切换至: ${TUTORS[tutor].name}`, 'success');
+      // Update active highlight
+      composeMenu?.querySelectorAll('.tutor-menu-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+      composeMenu?.classList.add('hidden');
+      composeBtn?.classList.remove('expanded');
+    });
+  });
+
+  // Close compose menu on outside click
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#composeMenuBtn') && !e.target.closest('#composeMenu')) {
+      composeMenu?.classList.add('hidden');
+      composeBtn?.classList.remove('expanded');
+    }
+  });
 
   // Auto-resize textarea
   input?.addEventListener('input', () => {
@@ -126,20 +201,22 @@ export function init() {
   sendBtn?.addEventListener('click', send);
   stopBtn?.addEventListener('click', stopStreaming);
 
+  // Context chip removal
+  document.getElementById('ctxChipRemove')?.addEventListener('click', () => {
+    clearFilePreview();
+  });
+  document.getElementById('tutorChipRemove')?.addEventListener('click', () => {
+    localStorage.setItem('asr_active_tutor', 'general');
+    toast('已切换至: 通用助手', 'success');
+    reRender();
+  });
+
   // Suggestion buttons
   document.querySelectorAll('.suggestion-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       input.value = btn.dataset.text;
       input.focus();
     });
-  });
-
-  // Context button (+) — load transcribe list and show picker
-  document.getElementById('ctxAddBtn')?.addEventListener('click', loadContextPicker);
-
-  // Close pickers on outside click
-  document.addEventListener('click', (e) => {
-    if (!e.target.closest('#ctxAddBtn') && !e.target.closest('#ctxPicker')) closeCtxPicker();
   });
 
   // Copy buttons on assistant messages
@@ -166,6 +243,51 @@ export function init() {
 
   smartScrollToBottom(msgs);
   input?.focus();
+
+  // Load tutors from Nanobot API (non-blocking, fallback to local TUTORS)
+  loadTutorsFromAPI();
+}
+
+async function loadTutorsFromAPI() {
+  const { API } = await import('../api.js');
+  if (!API?.nanobotListTutors) return;
+  try {
+    const data = await API.nanobotListTutors();
+    const tutors = data?.tutors || [];
+    for (const t of tutors) {
+      tutorCache[t.name] = { soul: t.soul, knowledge: null };
+    }
+    // Rebuild compose menu tutor items if API returned tutors
+    if (tutors.length > 0) {
+      rebuildTutorMenuItems(tutors);
+    }
+  } catch {
+    // Fallback to local TUTORS — already defined
+  }
+}
+
+function rebuildTutorMenuItems(tutors) {
+  const menu = document.getElementById('composeMenu');
+  if (!menu) return;
+  const section = menu.querySelector('.compose-menu-section:last-child');
+  if (!section) return;
+  const activeTutor = localStorage.getItem('asr_active_tutor') || 'general';
+  section.innerHTML = tutors.map(t =>
+    `<div class="compose-menu-item tutor-menu-item ${t.name === activeTutor ? 'active' : ''}" data-tutor="${t.name}">${t.name}</div>`
+  ).join('');
+  // Re-bind click handlers
+  section.querySelectorAll('.tutor-menu-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const tutor = item.dataset.tutor;
+      localStorage.setItem('asr_active_tutor', tutor);
+      const name = TUTORS[tutor]?.name || tutor;
+      toast(`已切换至: ${name}`, 'success');
+      menu?.querySelectorAll('.tutor-menu-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+      menu?.classList.add('hidden');
+      document.getElementById('composeMenuBtn')?.classList.remove('expanded');
+    });
+  });
 }
 
 // Load transcribe list and show file picker
@@ -267,7 +389,17 @@ async function send() {
   // Re-render to show user message + thinking indicator
   reRender();
 
+  // Add typing indicator at bottom
   const msgs = document.getElementById('chatMessages');
+  if (msgs) {
+    const typingEl = document.createElement('div');
+    typingEl.className = 'typing-indicator';
+    typingEl.id = 'typingIndicator';
+    typingEl.innerHTML = '<span>正在生成</span><span class="typing-dots"></span>';
+    msgs.appendChild(typingEl);
+    smartScrollToBottom(msgs);
+  }
+
   const assistantEl = msgs?.querySelector('.chat-msg.assistant:last-child .md-renderer');
   currentStreamingEl = assistantEl;
 
@@ -305,6 +437,8 @@ async function send() {
     );
 
     // Finalize
+    // Remove typing indicator
+    document.getElementById('typingIndicator')?.remove();
     updateLastAssistant(fullText);
     if (usage) {
       session.usage.prompt_tokens += usage.prompt_tokens || 0;
@@ -327,10 +461,12 @@ async function send() {
     // Update sidebar session titles
     updateSidebarSessions();
   } catch (err) {
+    document.getElementById('typingIndicator')?.remove();
     toast('发送失败: ' + err.message, 'error');
     updateLastAssistant('错误: ' + err.message);
     reRender();
   } finally {
+    document.getElementById('typingIndicator')?.remove();
     isStreaming = false;
     abortController = null;
     currentStreamingEl = null;
@@ -421,10 +557,10 @@ async function chatStream(apiMessages, config, onChunk, onComplete) {
 function buildApiMessages(session, newText, config) {
   const contexts = buildContextText(session);
 
-  // Tutor system prompt override
+  // Tutor system prompt — prefer API cache, fallback to local TUTORS
   const activeTutor = localStorage.getItem('asr_active_tutor') || 'general';
-  const tutorSystem = TUTORS[activeTutor]?.system || TUTORS.general.system;
-  const baseSystem = config.system_prompt || tutorSystem;
+  const tutorSoul = tutorCache[activeTutor]?.soul || TUTORS[activeTutor]?.system || TUTORS.general.system;
+  const baseSystem = config.system_prompt || tutorSoul;
 
   const fullSystem = contexts ? `${baseSystem}\n\n## 参考上下文\n${contexts}` : baseSystem;
 
@@ -689,32 +825,45 @@ function processThinkingCards(el) {
    Message bubble rendering
    ═══════════════════════════════════════════ */
 
-function messageBubble(m, idx) {
+function messageBubble(m, idx, session) {
   const isUser = m.role === 'user';
   const isEmpty = !m.content && m.role === 'assistant';
+  const prevMsg = idx > 0 && session ? session.messages[idx - 1] : null;
+  const showAvatar = !prevMsg || prevMsg.role !== m.role;
+  const showDivider = prevMsg && prevMsg.role !== m.role;
 
   const userAvatar = localStorage.getItem('user-avatar') || '';
   const aiAvatar = localStorage.getItem('ai-avatar') || '';
 
-  if (isUser) {
-    const avatarHTML = userAvatar
-      ? `<div class="avatar"><img src="${userAvatar}" alt=""></div>`
-      : `<div class="avatar">你</div>`;
-    return `
-    <div class="chat-msg user">
-      <div class="chat-msg-avatar">${avatarHTML}</div>
-      <div class="chat-msg-bubble">${escapeHtml(m.content)}</div>
-    </div>`;
+  let html = '';
+  if (showDivider) {
+    html += '<div class="msg-divider"></div>';
   }
 
-  const content = isEmpty ? '<span class="spinner" style="display:inline-block"></span> 正在思考...' : renderMarkdown(m.content);
-  const avatarHTML = aiAvatar
-    ? `<div class="avatar"><img src="${aiAvatar}" alt=""></div>`
-    : `<div class="avatar avatar--primary">AI</div>`;
+  if (isUser) {
+    const avatarHTML = showAvatar
+      ? (userAvatar
+        ? `<div class="avatar"><img src="${userAvatar}" alt=""></div>`
+        : `<div class="avatar">你</div>`)
+      : '';
+    html += `
+    <div class="chat-msg user">
+      ${avatarHTML ? `<div class="chat-msg-avatar">${avatarHTML}</div>` : ''}
+      <div class="chat-msg-bubble">${escapeHtml(m.content)}</div>
+    </div>`;
+    return html;
+  }
 
-  return `
+  const avatarHTML = showAvatar
+    ? (aiAvatar
+      ? `<div class="avatar"><img src="${aiAvatar}" alt=""></div>`
+      : `<div class="avatar avatar--primary">AI</div>`)
+    : '';
+  const content = isEmpty ? '<span class="spinner" style="display:inline-block"></span> 正在思考...' : renderMarkdown(m.content);
+
+  html += `
     <div class="chat-msg assistant">
-      <div class="chat-msg-avatar">${avatarHTML}</div>
+      ${avatarHTML ? `<div class="chat-msg-avatar">${avatarHTML}</div>` : ''}
       <div class="md-renderer prose prose-enhanced">${content}</div>
       ${m.content && !isEmpty ? `
       <div class="chat-msg-actions">
@@ -727,8 +876,8 @@ function messageBubble(m, idx) {
           下载
         </button>
       </div>` : ''}
-    </div>
-  `;
+    </div>`;
+  return html;
 }
 
 /* ═══════════════════════════════════════════

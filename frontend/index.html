@@ -27,6 +27,23 @@ if (typeof markdownit !== 'undefined' && typeof window['markdown-it-katex'] !== 
 </script>
 </head>
 <body>
+<!-- Electron custom titlebar — only visible in frameless desktop mode -->
+<div id="titlebar" class="titlebar" style="display:none">
+  <div class="titlebar-drag"></div>
+  <span class="titlebar-app-name">ASR Studio</span>
+  <div class="window-controls">
+    <button class="wc-btn wc-minimize" id="wcMinimize" title="最小化">
+      <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1.2"/></svg>
+    </button>
+    <button class="wc-btn wc-maximize" id="wcMaximize" title="最大化">
+      <svg id="wcMaxIcon" width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+    </button>
+    <button class="wc-btn wc-close" id="wcClose" title="关闭">
+      <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" stroke-width="1.2"/><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" stroke-width="1.2"/></svg>
+    </button>
+  </div>
+</div>
+
 <div id="app" class="app-shell">
   <aside id="sidebar" class="sidebar"></aside>
   <main id="main-content" class="main-content">
@@ -50,6 +67,6 @@ if (typeof markdownit !== 'undefined' && typeof window['markdown-it-katex'] !== 
   <aside id="right-panel" class="right-panel"></aside>
 </div>
 <div id="toast-container"></div>
-<script type="module" src="/assets/js/app.js?v=20260504fix7"></script>
+<script type="module" src="/assets/js/app.js?v=20260505fix7"></script>
 </body>
 </html>

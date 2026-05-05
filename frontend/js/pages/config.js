@@ -53,6 +53,10 @@ export function render() {
   const activePreset = getActivePreset();
   const saved = loadPresetConfig(activePreset);
 
+  // Load saved Obsidian path
+  let savedObsidianPath = '';
+  try { savedObsidianPath = JSON.parse(localStorage.getItem('asr_obsidian_config') || '{}').path || ''; } catch {}
+
   let presetBtns = Object.entries(PRESETS).map(([key, p]) =>
     `<button class="preset-btn ${key === activePreset ? 'active' : ''}" data-preset="${key}">${p.label}</button>`
   ).join('');
@@ -134,6 +138,27 @@ export function render() {
         </div>
       </details>
     </div>
+
+    <div class="card">
+      <h2>Obsidian 知识库同步</h2>
+      <div class="form-hint" style="margin-bottom:12px">
+        将本地 Obsidian 笔记同步到对应导师的知识库，自动按学科分类。
+      </div>
+      <div id="obsidianSection">
+        <div class="form-group">
+          <label>Obsidian 仓库路径</label>
+          <input type="text" class="form-input" id="obsidianPath" value="${savedObsidianPath || 'D:\\my-note'}" placeholder="D:\\my-note">
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+          <button type="button" class="btn btn-primary" id="obsidianSyncBtn">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            立即同步
+          </button>
+          <span class="text-dim text-sm" id="obsidianStatus"></span>
+        </div>
+        <div class="form-hint" id="obsidianLastSync"></div>
+      </div>
+    </div>
   `;
 }
 
@@ -182,6 +207,7 @@ export function init() {
 
   updateStatus();
   initNanobot();
+  initObsidianSync();
 }
 
 function switchPreset(name) {
@@ -568,4 +594,62 @@ async function reloadNanobotStatus() {
     renderNanobotSection(st, provider);
     loadAllNanobotFiles();
   } catch {}
+}
+
+// ============ Obsidian 知识库同步 ============
+
+async function initObsidianSync() {
+  // Load last sync status
+  try {
+    const status = await API.obsidianStatus();
+    const statusEl = document.getElementById('obsidianStatus');
+    const lastSyncEl = document.getElementById('obsidianLastSync');
+    if (status.last_sync) {
+      lastSyncEl.textContent = `上次同步: ${new Date(status.last_sync * 1000).toLocaleString('zh-CN')} · ${status.last_synced} 文件已同步`;
+    }
+  } catch {}
+
+  // Save Obsidian path on input change
+  document.getElementById('obsidianPath')?.addEventListener('change', (e) => {
+    try {
+      const cfg = JSON.parse(localStorage.getItem('asr_obsidian_config') || '{}');
+      cfg.path = e.target.value;
+      localStorage.setItem('asr_obsidian_config', JSON.stringify(cfg));
+    } catch {}
+  });
+
+  // Sync button
+  document.getElementById('obsidianSyncBtn')?.addEventListener('click', async () => {
+    const btn = document.getElementById('obsidianSyncBtn');
+    const statusEl = document.getElementById('obsidianStatus');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;display:inline-block"></span> 同步中...';
+    statusEl.textContent = '';
+
+    const path = document.getElementById('obsidianPath')?.value?.trim();
+    if (!path) {
+      toast('请输入 Obsidian 仓库路径', 'error');
+      btn.disabled = false;
+      btn.innerHTML = '立即同步';
+      return;
+    }
+
+    try {
+      const result = await API.obsidianSync(path);
+      if (result.success) {
+        toast(result.message, 'success');
+        statusEl.innerHTML = `<span style="color:var(--success)">✓ ${result.files_synced} 新增, ${result.files_skipped} 跳过</span>`;
+        document.getElementById('obsidianLastSync').textContent =
+          `上次同步: ${new Date().toLocaleString('zh-CN')} · 共 ${result.files_scanned} 文件`;
+      } else {
+        toast(result.message || '同步失败', 'error');
+      }
+    } catch (err) {
+      toast('同步失败: ' + err.message, 'error');
+    }
+    btn.disabled = false;
+    btn.innerHTML = `
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      立即同步`;
+  });
 }

@@ -41,9 +41,14 @@ opencli-deepseek/
 
 # Personal / misc
 test_pipeline.py
-*.md
 project_for_chatgpt.md
 project_source.zip
+
+# Node modules
+node_modules/
+
+# Backups
+*.bak
 
 # Frontend
 frontend/bg.jpg

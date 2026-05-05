@@ -7,6 +7,8 @@ let visible = true;
 let hwExpanded = false;
 let hwMetrics = null;
 let hwPollTimer = null;
+let calExpanded = false;   // calendar widget expanded state
+let selectedDate = null;   // 'YYYY-MM-DD' or null = today
 
 export function mount(container) {
   el = container;
@@ -145,7 +147,7 @@ function render() {
   // Hardware monitor dropdown
   const hwHTML = renderHardwareMonitor();
 
-  // Course schedule
+  // Course schedule calendar (collapsible like hardware monitor)
   const scheduleHTML = renderSchedule();
 
   el.innerHTML = `
@@ -167,6 +169,18 @@ function render() {
   el.querySelector('#rpHwToggle')?.addEventListener('click', () => {
     hwExpanded = !hwExpanded;
     render();
+  });
+  el.querySelector('#rpCalToggle')?.addEventListener('click', () => {
+    calExpanded = !calExpanded;
+    render();
+  });
+  // Calendar day click delegation
+  el.querySelectorAll('.rp-cal-cell[data-date]').forEach(cell => {
+    cell.addEventListener('click', (e) => {
+      e.stopPropagation();
+      selectedDate = cell.dataset.date;
+      render();
+    });
   });
 }
 
@@ -308,50 +322,98 @@ function timeAgo(ts) {
   return Math.floor(diff / 3600) + ' 小时前';
 }
 
-// ── Course schedule in right panel ──
+// ── Course schedule calendar — collapsible like hardware monitor ──
 
 function renderSchedule() {
   let entries = [];
   try {
     entries = JSON.parse(localStorage.getItem('asr_schedule') || '[]');
-  } catch { return ''; }
+  } catch { entries = []; }
 
-  if (!entries.length) return '';
+  const chevron = calExpanded ? '▼' : '▶';
 
-  const today = new Date().getDay();
-  const todayIdx = today === 0 ? 7 : today;
-  const dayNames = { 1: '周一', 2: '周二', 3: '周三', 4: '周四', 5: '周五', 6: '周六', 7: '周日' };
+  // Always render the header (like hardware monitor)
+  let html = `
+  <div class="rp-section rp-cal-section">
+    <div class="rp-cal-toggle" id="rpCalToggle">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+      课程表 <span class="rp-cal-chevron">${chevron}</span>
+    </div>`;
 
-  const todayEntries = entries.filter(e => e.day === todayIdx).sort((a, b) => a.start.localeCompare(b.start));
+  if (!calExpanded) {
+    // Collapsed: just show today's course count preview
+    const now = new Date();
+    const dow = now.getDay();
+    const dowIdx = dow === 0 ? 7 : dow;
+    const todayCourses = entries.filter(e => e.day === dowIdx).length;
+    html += `<div class="rp-cal-preview">今天 ${todayCourses} 节课</div>`;
+    html += '</div>';
+    return html;
+  }
+
+  // Expanded: full calendar grid
   const now = new Date();
-  const nowMin = now.getHours() * 60 + now.getMinutes();
-  const upcoming = todayEntries.filter(e => {
-    const [h, m] = e.start.split(':').map(Number);
-    return h * 60 + m > nowMin;
-  });
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  const today = now.getDate();
+  const dayNames = ['日', '一', '二', '三', '四', '五', '六'];
 
-  let html = `<div class="rp-section rp-schedule"><div class="rp-section-title">📅 今天 (${dayNames[todayIdx] || '今天'})</div>`;
+  const firstDay = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
 
-  if (todayEntries.length === 0) {
-    html += '<div class="rp-schedule-empty">今天没有课程</div>';
+  // Selected date defaults to today
+  const showDate = selectedDate || `${year}-${String(month + 1).padStart(2, '0')}-${String(today).padStart(2, '0')}`;
+
+  // Month label + prev/next could go here, keeping it simple for now
+  html += `<div class="rp-cal-expanded">`;
+  html += `<div class="rp-cal-month-label">${year}年${month + 1}月</div>`;
+
+  // Calendar grid
+  html += '<div class="rp-cal-grid">';
+  for (let d = 0; d < 7; d++) {
+    html += `<div class="rp-cal-head">${dayNames[d]}</div>`;
+  }
+
+  // Empty cells before first day
+  for (let i = 0; i < firstDay; i++) {
+    html += '<div class="rp-cal-cell rp-cal-empty"></div>';
+  }
+
+  // Day cells
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    const isToday = day === today;
+    const isSelected = dateStr === showDate;
+    const hasClass = entries.some(e => e.date === dateStr || (!e.date && e.day === ((new Date(year, month, day).getDay() + 6) % 7 + 1)));
+    html += `<div class="rp-cal-cell ${isToday ? 'rp-cal-today' : ''} ${isSelected ? 'rp-cal-selected' : ''} ${hasClass ? 'rp-cal-has-class' : ''}" data-date="${dateStr}">${day}</div>`;
+  }
+
+  html += '</div>'; // grid
+
+  // Courses for selected date
+  const selDow = new Date(showDate).getDay();
+  const selDowIdx = selDow === 0 ? 7 : selDow;
+  const dayCourses = entries
+    .filter(e => e.date === showDate || (!e.date && e.day === selDowIdx))
+    .sort((a, b) => a.start.localeCompare(b.start));
+
+  const isTodaySel = showDate === `${year}-${String(month + 1).padStart(2, '0')}-${String(today).padStart(2, '0')}`;
+  const selLabel = isTodaySel ? '今天' : showDate;
+  html += `<div class="rp-schedule-day-label">${selLabel} (${dayCourses.length})</div>`;
+
+  if (dayCourses.length === 0) {
+    html += '<div class="rp-schedule-empty">没有课程</div>';
   } else {
-    for (const c of todayEntries) {
-      const isCurrent = todayEntries.indexOf(c) >= 0 && c.start.replace(':', '') <= String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0') && c.end.replace(':', '') >= String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
-      html += `<div class="rp-schedule-item ${isCurrent ? 'active' : ''}">
-        <span class="rp-schedule-time">${c.start}-${c.end}</span>
+    for (const c of dayCourses) {
+      html += `<div class="rp-schedule-item">
+        <span class="rp-schedule-time">${c.start}–${c.end}</span>
         <span class="rp-schedule-subject">${esc(c.subject)}</span>
         ${c.room ? `<span class="rp-schedule-room">${esc(c.room)}</span>` : ''}
       </div>`;
     }
   }
 
-  // Next class
-  if (upcoming.length > 0) {
-    const next = upcoming[0];
-    html += `<div class="rp-schedule-next">下一节: ${esc(next.subject)} ${next.start} 开始</div>`;
-  }
-
-  html += '</div>';
+  html += '</div></div>'; // expanded + section
   return html;
 }
 

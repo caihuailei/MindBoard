@@ -1665,6 +1665,214 @@ def write_nanobot_workspace_file(filename: str, content: str = Form(...)):
     return {"success": True, "filename": filename}
 
 
+# ============ nanobot 导师管理 ============
+
+class CreateTutorBody(BaseModel):
+    name: str
+    soul: str = ""
+    knowledge: str = ""
+
+
+@app.get("/nanobot/tutors")
+def nanobot_list_tutors():
+    """列出所有导师（读取 workspace/tutors/ 目录）"""
+    return {"tutors": nanobot_mgr.list_tutors()}
+
+
+@app.get("/nanobot/tutors/{name}/soul")
+def nanobot_get_tutor_soul(name: str):
+    """获取导师人设"""
+    soul = nanobot_mgr.get_tutor_soul(name)
+    if soul is None:
+        raise HTTPException(status_code=404, detail=f"导师 '{name}' 不存在")
+    return {"name": name, "soul": soul}
+
+
+@app.put("/nanobot/tutors/{name}/soul")
+async def nanobot_set_tutor_soul(name: str, request: Request):
+    """更新导师人设"""
+    body = await request.json()
+    content = body.get("soul", "")
+    nanobot_mgr.set_tutor_soul(name, content)
+    return {"success": True, "name": name}
+
+
+@app.get("/nanobot/tutors/{name}/knowledge")
+def nanobot_get_tutor_knowledge(name: str):
+    """获取导师知识库"""
+    content = nanobot_mgr.get_tutor_knowledge(name)
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"导师 '{name}' 不存在")
+    return {"name": name, "knowledge": content}
+
+
+@app.put("/nanobot/tutors/{name}/knowledge")
+async def nanobot_set_tutor_knowledge(name: str, request: Request):
+    """更新导师知识库"""
+    body = await request.json()
+    content = body.get("knowledge", "")
+    nanobot_mgr.set_tutor_knowledge(name, content)
+    return {"success": True, "name": name}
+
+
+@app.post("/nanobot/tutors")
+def nanobot_create_tutor(body: CreateTutorBody):
+    """创建新导师（自动创建 SOUL.md + KNOWLEDGE.md）"""
+    result = nanobot_mgr.create_tutor(body.name, body.soul, body.knowledge)
+    if not result["success"]:
+        raise HTTPException(status_code=409, detail=result["message"])
+    return result
+
+
+# ============ Obsidian 知识库同步 ============
+OBSIDIAN_STATUS_PATH = BASE_DIR / "obsidian_sync_status.json"
+
+
+class ObsidianSyncBody(BaseModel):
+    obsidian_path: str = ""
+    classify_with_llm: bool = True  # whether to use LLM for classification
+
+
+def _find_markdown_files(root: Path) -> list[Path]:
+    """遍历目录下所有 .md 文件，跳过隐藏/系统目录"""
+    md_files = []
+    skip_dirs = {'.git', '.obsidian', '.trash', 'node_modules', '__pycache__'}
+    for p in root.rglob("*.md"):
+        if any(part in skip_dirs for part in p.parts):
+            continue
+        md_files.append(p)
+    return md_files
+
+
+def _classify_to_tutor(content: str) -> str:
+    """根据文件内容判断归属哪个导师（无 LLM 的关键词匹配回退）"""
+    content_lower = content[:3000].lower()
+    keyword_map = {
+        "math": ["数学", "微积分", "线性代数", "概率", "函数", "导数", "积分", "方程", "几何", "代数"],
+        "physics": ["物理", "力学", "电磁", "光学", "热学", "量子", "相对论", "牛顿", "万有引力"],
+        "english": ["英语", "grammar", "vocabulary", "writing", "reading comprehension", "essay"],
+        "programming": ["编程", "代码", "算法", "数据结构", "python", "java", "javascript", "函数", "类", "接口"],
+        "language": ["语文", "文学", "修辞", "诗歌", "散文", "写作指导", "阅读理解"],
+    }
+    best = "general"
+    best_score = 0
+    for tutor, keywords in keyword_map.items():
+        score = sum(1 for kw in keywords if kw in content_lower)
+        if score > best_score:
+            best = tutor
+            best_score = score
+    return best
+
+
+def _llm_classify(content: str) -> str | None:
+    """用 LLM 判断文件归属哪个导师"""
+    try:
+        llm_cfg = _load_llm_config()
+        if not llm_cfg.get("api_key") or not llm_cfg.get("api_url"):
+            return None
+        prompt = f"""请判断以下文本属于哪个学科。只返回一个词：math, physics, english, programming, language, general。
+文本：
+{content[:2000]}"""
+        resp = _call_llm(llm_cfg["api_key"], llm_cfg["api_url"], llm_cfg.get("model_name", "deepseek-v4-flash"),
+                         "你是学科分类助手。", prompt, 0.1)
+        result = resp.choices[0].message.content.strip().lower()
+        valid = {"math", "physics", "english", "programming", "language", "general"}
+        return result if result in valid else "general"
+    except Exception:
+        return None
+
+
+@app.post("/nanobot/obsidian/sync")
+def obsidian_sync(body: ObsidianSyncBody):
+    """同步 Obsidian 笔记到导师知识库（增量）"""
+    obsidian_path = body.obsidian_path.strip()
+    if not obsidian_path:
+        # Try to load saved status for default path
+        if OBSIDIAN_STATUS_PATH.exists():
+            try:
+                status = json.loads(OBSIDIAN_STATUS_PATH.read_text(encoding="utf-8"))
+                obsidian_path = status.get("obsidian_path", "")
+            except Exception:
+                pass
+        if not obsidian_path:
+            raise HTTPException(status_code=400, detail="需要提供 Obsidian 路径")
+
+    root = Path(obsidian_path)
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"路径不存在: {obsidian_path}")
+
+    md_files = _find_markdown_files(root)
+    if not md_files:
+        return {"success": False, "message": "未找到 .md 文件", "files_scanned": 0, "files_synced": 0}
+
+    # Load sync history
+    history = {}
+    if OBSIDIAN_STATUS_PATH.exists():
+        try:
+            history = json.loads(OBSIDIAN_STATUS_PATH.read_text(encoding="utf-8")).get("files", {})
+        except Exception:
+            pass
+
+    synced = 0
+    skipped = 0
+    for f in md_files:
+        # Check if file changed since last sync
+        mtime = f.stat().st_mtime
+        rel = str(f.relative_to(root))
+        if rel in history and history[rel].get("mtime") == mtime:
+            skipped += 1
+            continue
+
+        content = f.read_text(encoding="utf-8", errors="ignore")
+        # Classify to tutor
+        if body.classify_with_llm:
+            tutor = _llm_classify(content) or _classify_to_tutor(content)
+        else:
+            tutor = _classify_to_tutor(content)
+
+        # Append to tutor's KNOWLEDGE.md
+        existing = nanobot_mgr.get_tutor_knowledge(tutor) or f"# {tutor} 知识库\n\n"
+        header = f"\n\n---\n## {rel}\n> 同步时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        nanobot_mgr.set_tutor_knowledge(tutor, existing + header + content[:5000])
+        history[rel] = {"mtime": mtime, "tutor": tutor, "synced_at": time.time()}
+        synced += 1
+
+    # Save status
+    OBSIDIAN_STATUS_PATH.write_text(json.dumps({
+        "obsidian_path": obsidian_path,
+        "last_sync": time.time(),
+        "files": history,
+        "total_files": len(md_files),
+        "last_synced": synced,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return {
+        "success": True,
+        "message": f"同步完成: {synced} 新增, {skipped} 跳过",
+        "files_scanned": len(md_files),
+        "files_synced": synced,
+        "files_skipped": skipped,
+        "last_sync": time.time(),
+    }
+
+
+@app.get("/nanobot/obsidian/status")
+def obsidian_status():
+    """返回上次同步状态"""
+    if OBSIDIAN_STATUS_PATH.exists():
+        try:
+            data = json.loads(OBSIDIAN_STATUS_PATH.read_text(encoding="utf-8"))
+            return {
+                "obsidian_path": data.get("obsidian_path", ""),
+                "last_sync": data.get("last_sync", 0),
+                "total_files": data.get("total_files", 0),
+                "last_synced": data.get("last_synced", 0),
+            }
+        except Exception:
+            pass
+    return {"obsidian_path": "", "last_sync": 0, "total_files": 0, "last_synced": 0}
+
+
 # ============ 持久化结果查询 ============
 @app.get("/results")
 def list_results():

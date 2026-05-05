@@ -49,6 +49,21 @@ MEMORY_MD = """\
 （Dream 会从历史中 auto-learn）
 """
 
+DEFAULT_TUTORS = {
+    "general": {
+        "name": "通用助手",
+        "soul": "你是一个全能的AI助手，擅长回答问题、分析文本和提供建议。请用简洁、专业的语言回答。",
+    },
+    "math": {
+        "name": "数学导师",
+        "soul": "你是一名数学导师，擅长用严谨的数学语言解释概念。回答时请使用准确的数学符号和公式（用 $...$ 或 $$...$$ 包裹 LaTeX 公式），并给出详细的推导步骤。",
+    },
+    "physics": {
+        "name": "物理导师",
+        "soul": "你是一名物理导师，擅长用物理直觉和数学工具解释现象。回答时请用清晰的逻辑，从基本原理出发推导结论，并使用 LaTeX 公式（$...$ 或 $$...$$）表达。",
+    },
+}
+
 
 class NanobotManager:
     """nanobot 服务生命周期管理（子进程模式）"""
@@ -91,6 +106,20 @@ class NanobotManager:
         if not mem.exists():
             mem.write_text(MEMORY_MD, encoding="utf-8")
             logger.info("Created MEMORY.md")
+
+        # Create default tutors
+        tutors_dir = self.workspace / "tutors"
+        tutors_dir.mkdir(exist_ok=True)
+        for tutor_name, tutor_data in DEFAULT_TUTORS.items():
+            tutor_dir = tutors_dir / tutor_name
+            tutor_dir.mkdir(exist_ok=True)
+            soul_file = tutor_dir / "SOUL.md"
+            if not soul_file.exists():
+                soul_file.write_text(tutor_data["soul"], encoding="utf-8")
+            knowledge_file = tutor_dir / "KNOWLEDGE.md"
+            if not knowledge_file.exists():
+                knowledge_file.write_text(f"# {tutor_data['name']} 知识库\n\n（通过 Dream 机制自动整理）\n", encoding="utf-8")
+        logger.info(f"Created {len(DEFAULT_TUTORS)} default tutors")
 
         # workspace/config.json
         cfg = self.workspace / "config.json"
@@ -225,3 +254,60 @@ class NanobotManager:
             "workspace": str(self.workspace),
             "api_url": self.api_url if running else "",
         }
+
+    # ── Tutor management ──
+
+    def list_tutors(self) -> list[dict]:
+        """列出所有导师"""
+        tutors_dir = self.workspace / "tutors"
+        if not tutors_dir.exists():
+            return []
+        tutors = []
+        for d in sorted(tutors_dir.iterdir()):
+            if d.is_dir():
+                soul_path = d / "SOUL.md"
+                knowledge_path = d / "KNOWLEDGE.md"
+                tutor = {
+                    "name": d.name,
+                    "soul": soul_path.read_text(encoding="utf-8") if soul_path.exists() else "",
+                    "has_knowledge": knowledge_path.exists(),
+                }
+                tutors.append(tutor)
+        return tutors
+
+    def get_tutor_soul(self, name: str) -> str | None:
+        """获取导师人设"""
+        soul_path = self.workspace / "tutors" / name / "SOUL.md"
+        if not soul_path.exists():
+            return None
+        return soul_path.read_text(encoding="utf-8")
+
+    def set_tutor_soul(self, name: str, content: str):
+        """更新导师人设"""
+        tutor_dir = self.workspace / "tutors" / name
+        tutor_dir.mkdir(parents=True, exist_ok=True)
+        (tutor_dir / "SOUL.md").write_text(content, encoding="utf-8")
+
+    def get_tutor_knowledge(self, name: str) -> str | None:
+        """获取导师知识库"""
+        path = self.workspace / "tutors" / name / "KNOWLEDGE.md"
+        if not path.exists():
+            return None
+        return path.read_text(encoding="utf-8")
+
+    def set_tutor_knowledge(self, name: str, content: str):
+        """更新导师知识库"""
+        tutor_dir = self.workspace / "tutors" / name
+        tutor_dir.mkdir(parents=True, exist_ok=True)
+        (tutor_dir / "KNOWLEDGE.md").write_text(content, encoding="utf-8")
+
+    def create_tutor(self, name: str, soul: str = "", knowledge: str = "") -> dict:
+        """创建新导师"""
+        tutor_dir = self.workspace / "tutors" / name
+        if tutor_dir.exists():
+            return {"success": False, "message": f"导师 '{name}' 已存在"}
+        tutor_dir.mkdir(parents=True, exist_ok=True)
+        (tutor_dir / "SOUL.md").write_text(soul, encoding="utf-8")
+        (tutor_dir / "KNOWLEDGE.md").write_text(knowledge or f"# {name} 知识库\n\n（通过 Dream 机制自动整理）\n", encoding="utf-8")
+        logger.info(f"Created tutor: {name}")
+        return {"success": True, "message": f"导师 '{name}' 已创建"}

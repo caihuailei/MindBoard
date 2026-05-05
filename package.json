@@ -1,0 +1,37 @@
+{
+  "name": "asr-studio",
+  "version": "0.1.0",
+  "description": "ASR Studio - AI voice transcription workspace",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron electron/main.js",
+    "dev": "electron electron/main.js",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win"
+  },
+  "build": {
+    "appId": "com.asr.studio",
+    "productName": "ASR Studio",
+    "asar": false,
+    "files": [
+      "electron/**/*",
+      "frontend/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": ".",
+        "to": "server",
+        "filter": ["asr_api_server.py", "config.py", "models/**", "qwen_asr_source/**", "nanobot_manager.py", "requirements.txt", "llm_config.json", "nanobot_enabled.json", "nanobot_provider.json"]
+      }
+    ],
+    "win": {
+      "target": ["portable"],
+      "icon": "electron/icon.png"
+    }
+  },
+  "devDependencies": {
+    "electron": "^41.5.0",
+    "electron-builder": "^26.8.1"
+  }
+}

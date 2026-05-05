@@ -118,6 +118,114 @@ html.theme-glass .sb-footer-item:hover {
   background: rgba(255,255,255,0.08);
 }
 
+/* ── Warm Paper Theme — 宣纸质感 + 墨色层次 + 印章青蓝 ── */
+html.warm-paper {
+  color-scheme: light;
+  --background: #F5EFE4;
+  --foreground: #2A2622;
+  --card: #FBF7EE;
+  --card-fg: #2A2622;
+  --secondary: #EFE8DB;
+  --secondary-fg: #2A2622;
+  --muted: #E8DFD0;
+  --muted-fg: #6B6158;
+  --accent: rgba(83,125,150,0.08);
+  --accent-fg: #2A2622;
+  --primary: #537D96;
+  --primary-fg: #F5EFE4;
+  --destructive: #8B2C1F;
+  --destructive-fg: #ffffff;
+  --border: #D8CFBE;
+  --input: #FBF7EE;
+  --ring: #537D96;
+  --success: #4A6B4A;
+  --warning: #f59e0b;
+  --radius: 4px;
+  --radius-sm: 2px;
+}
+
+html.warm-paper body {
+  background-image:
+    repeating-linear-gradient(0deg, transparent, transparent 39px, rgba(0,0,0,0.012) 40px),
+    repeating-linear-gradient(90deg, transparent, transparent 39px, rgba(0,0,0,0.012) 40px);
+  background-size: 40px 40px;
+}
+
+html.warm-paper .sidebar {
+  background-image:
+    repeating-linear-gradient(0deg, transparent, transparent 39px, rgba(0,0,0,0.015) 40px),
+    repeating-linear-gradient(90deg, transparent, transparent 39px, rgba(0,0,0,0.015) 40px);
+  background-size: 40px 40px;
+}
+
+html.warm-paper .surface-card,
+html.warm-paper .chat-msg.user .chat-bubble,
+html.warm-paper .chat-msg.assistant .chat-bubble,
+html.warm-paper .chat-composer,
+html.warm-paper .modal,
+html.warm-paper .settings-modal,
+html.warm-paper .chat-welcome {
+  background-blend-mode: lighten;
+}
+
+html.warm-paper .main-topbar {
+  background-image:
+    repeating-linear-gradient(0deg, transparent, transparent 39px, rgba(0,0,0,0.012) 40px),
+    repeating-linear-gradient(90deg, transparent, transparent 39px, rgba(0,0,0,0.012) 40px);
+  background-size: 40px 40px;
+}
+
+/* Paper theme: square corners everywhere */
+html.warm-paper .chat-bubble,
+html.warm-paper .chat-msg-card,
+html.warm-paper .suggestion-btn,
+html.warm-paper .context-chip,
+html.warm-paper .btn,
+html.warm-paper input,
+html.warm-paper textarea,
+html.warm-paper select,
+html.warm-paper .modal,
+html.warm-paper .settings-modal,
+html.warm-paper .theme-option,
+html.warm-paper .theme-swatch,
+html.warm-paper .avatar,
+html.warm-paper .chat-composer,
+html.warm-paper .rp-section,
+html.warm-paper .rp-job,
+html.warm-paper .sb-session-item {
+  border-radius: var(--radius-sm, 2px) !important;
+}
+
+/* Paper texture on inputs */
+html.warm-paper .chat-composer textarea,
+html.warm-paper input:not([type="file"]),
+html.warm-paper select,
+html.warm-paper .settings-input,
+html.warm-paper .settings-textarea {
+  background-image:
+    repeating-linear-gradient(0deg, transparent, transparent 39px, rgba(0,0,0,0.01) 40px),
+    repeating-linear-gradient(90deg, transparent, transparent 39px, rgba(0,0,0,0.01) 40px);
+  background-size: 40px 40px;
+  background-blend-mode: lighten;
+}
+
+/* Paper theme: ink-style borders on inputs */
+html.warm-paper input:not([type="file"]),
+html.warm-paper select,
+html.warm-paper textarea {
+  border-width: 0.5px;
+}
+
+/* Paper theme: skill/hook cards texture */
+html.warm-paper .skill-card,
+html.warm-paper .hook-card {
+  background-image:
+    repeating-linear-gradient(0deg, transparent, transparent 39px, rgba(0,0,0,0.008) 40px),
+    repeating-linear-gradient(90deg, transparent, transparent 39px, rgba(0,0,0,0.008) 40px);
+  background-size: 40px 40px;
+  background-blend-mode: lighten;
+}
+
 /* ── Body ── */
 html, body { height: 100%; overflow: hidden; }
 html { -webkit-font-smoothing: antialiased; }
@@ -134,6 +242,55 @@ button, input, select, textarea { font: inherit; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--muted-fg); }
+
+/* ================================================================
+   Electron 无框窗口 — 自定义标题栏 + 窗口控制按钮
+   ================================================================ */
+.titlebar {
+  position: fixed; top: 0; left: 0; right: 0;
+  height: 36px; z-index: 9999;
+  display: flex; align-items: center;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.titlebar-drag {
+  flex: 1; height: 100%;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+.titlebar-app-name {
+  position: absolute; left: 12px;
+  font-size: 0.82em; font-weight: 600;
+  color: var(--muted-fg); opacity: 0.7;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Window controls — right side */
+.window-controls {
+  display: flex; align-items: stretch;
+  height: 100%;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  z-index: 2;
+}
+.wc-btn {
+  width: 44px; height: 100%;
+  border: none; background: transparent;
+  color: var(--muted-fg); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.12s, color 0.12s;
+}
+.wc-btn:hover { background: var(--muted); color: var(--foreground); }
+.wc-btn:active { background: var(--secondary); }
+/* Close button — red on hover */
+.wc-close:hover { background: #c42b1c; color: #fff; }
+
+/* Adjust app-shell to account for titlebar height */
+.electron-mode .app-shell { height: calc(100vh - 36px); margin-top: 36px; }
+.electron-mode .sidebar { height: calc(100vh - 36px); }
+.electron-mode .main-content { height: calc(100vh - 36px); }
+.electron-mode .right-panel { height: calc(100vh - 36px); }
 
 /* ================================================================
    三栏布局
@@ -1012,13 +1169,22 @@ select.form-input { cursor: pointer; }
   transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1); flex-shrink: 0;
 }
 
-/* Welcome screen — DeepTutor style */
+/* Welcome screen — DeepTutor/OpenHanako style */
 .chat-welcome {
   flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  padding: 40px 20px; text-align: center; color: var(--muted-fg);
+  padding: 60px 20px 40px; text-align: center; color: var(--muted-fg);
 }
-.chat-welcome h2 { font-size: 1.6em; color: var(--foreground); margin-bottom: 8px; font-weight: 700; }
-.chat-welcome p { font-size: 0.95em; margin-bottom: 32px; }
+.chat-welcome-avatar {
+  width: 80px; height: 80px; border-radius: 50%;
+  background: var(--secondary);
+  display: flex; align-items: center; justify-content: center;
+  margin: 0 auto 16px; box-shadow: 0 4px 16px var(--shadow);
+  font-size: 2em; user-select: none; pointer-events: none;
+  transition: transform 0.2s;
+}
+.chat-welcome-avatar:hover { transform: scale(1.05); }
+.chat-welcome h2 { font-size: 1.6em; color: var(--foreground); margin-bottom: 6px; font-weight: 700; }
+.chat-welcome-subtitle { font-size: 0.92em; color: var(--muted-fg); margin-bottom: 28px; letter-spacing: 0.02em; }
 
 .chat-suggestions {
   display: flex; gap: 10px; flex-wrap: wrap; justify-content: center;
@@ -1038,6 +1204,49 @@ select.form-input { cursor: pointer; }
   font-size: 0.9em;
 }
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+/* ── Typing indicator (OpenHanako style) ── */
+@keyframes typewriterDots {
+  0%, 100% { content: '\00a0'; }
+  25% { content: '.'; }
+  50% { content: '..'; }
+  75% { content: '...'; }
+}
+.typing-indicator {
+  display: flex; align-items: center; gap: 4px;
+  padding: 8px 12px; color: var(--muted-fg); font-size: 0.85em;
+}
+.typing-dots::after {
+  content: '';
+  animation: typewriterDots 1.4s steps(1, end) infinite;
+  display: inline-block; width: 1.2em; text-align: left;
+}
+
+/* ── Message divider (role boundary) ── */
+.msg-divider {
+  height: 1px; background: var(--border);
+  margin: 16px 0; opacity: 0.5;
+}
+
+/* ── Context chips row above composer ── */
+.context-chips {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 0 20px 8px;
+}
+.context-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 8px 3px 10px; border-radius: 8px;
+  font-size: 0.78em; background: var(--secondary);
+  border: 1px solid var(--border); color: var(--foreground);
+  transition: border-color 0.15s;
+}
+.context-chip:hover { border-color: var(--primary); }
+.context-chip-remove {
+  border: none; background: transparent; cursor: pointer;
+  color: var(--muted-fg); font-size: 1em; padding: 0 2px;
+  border-radius: 4px; line-height: 1; transition: color 0.15s;
+}
+.context-chip-remove:hover { color: var(--destructive); }
 
 /* Sidebar — new chat button */
 .sb-new-chat {
@@ -1320,13 +1529,19 @@ select.form-input {
 
 /* ── Settings Modal ── */
 .settings-modal {
-  max-width: 440px;
+  width: 640px;
+  max-width: 90vw;
+  height: 75vh;
+  max-height: 560px;
   padding: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 .settings-modal-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 16px 20px; border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 .settings-modal-header h3 { font-size: 1em; font-weight: 700; }
 .settings-close-btn {
@@ -1335,18 +1550,62 @@ select.form-input {
   transition: background 0.15s;
 }
 .settings-close-btn:hover { background: var(--muted); }
+
+/* Tab layout: left nav + right content */
+.settings-body {
+  display: flex; flex: 1; min-height: 0; overflow: hidden;
+}
+.settings-nav {
+  width: 140px; flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 6px;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+.settings-nav-item {
+  padding: 8px 10px; border-radius: var(--radius-sm);
+  font-size: 0.85rem; color: var(--muted-fg);
+  background: none; border: none; cursor: pointer;
+  display: flex; align-items: center; gap: 8px;
+  transition: all 0.15s; font-weight: 500; text-align: left;
+}
+.settings-nav-item:hover { background: var(--muted); color: var(--foreground); }
+.settings-nav-item.active { background: var(--accent); color: var(--accent-fg, var(--primary)); }
+.settings-nav-item svg { flex-shrink: 0; opacity: 0.7; }
+.settings-nav-item.active svg { opacity: 1; }
+
+.settings-content {
+  flex: 1; padding: 16px 20px; overflow-y: auto;
+  min-width: 0;
+}
+.settings-panel { display: none; }
+.settings-panel.active { display: block; }
+
 .settings-modal-body { padding: 20px; }
+.settings-modal-footer {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 12px 20px; border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
 
 .settings-section { margin-bottom: 20px; }
+.settings-section-title {
+  font-size: 0.85em; font-weight: 600; color: var(--foreground);
+  margin-bottom: 12px; display: flex; align-items: center; gap: 8px;
+}
 .settings-label {
   display: block; font-size: 0.82em; font-weight: 600;
   color: var(--muted-fg); margin-bottom: 8px; text-transform: uppercase;
   letter-spacing: 0.3px;
 }
+.settings-hint {
+  font-size: 0.75em; color: var(--muted-fg); margin-top: 4px;
+  line-height: 1.4;
+}
 
 /* Theme options grid */
 .theme-options {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px;
 }
 .theme-option {
   display: flex; flex-direction: column; align-items: center; gap: 6px;
@@ -1361,7 +1620,25 @@ select.form-input {
   box-shadow: var(--shadow);
 }
 
-/* Avatar input row */
+/* ── Avatar upload with camera hover ── */
+.avatar-upload-wrap {
+  position: relative; width: 72px; height: 72px;
+  border-radius: 50%; overflow: hidden; cursor: pointer;
+  transition: transform 0.2s; flex-shrink: 0;
+}
+.avatar-upload-wrap:hover { transform: scale(1.05); }
+.avatar-upload-wrap img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.avatar-upload-overlay {
+  position: absolute; inset: 0;
+  background: rgba(0,0,0,0.35); opacity: 0;
+  transition: opacity 0.2s;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+.avatar-upload-wrap:hover .avatar-upload-overlay { opacity: 1; }
+
 .avatar-input-row {
   display: flex; align-items: center; gap: 12px;
 }
@@ -1370,6 +1647,60 @@ select.form-input {
 }
 .avatar-input-actions {
   display: flex; align-items: center; gap: 8px; flex: 1;
+}
+
+/* ── Toggle / Switch ── */
+.hana-toggle {
+  width: 36px; height: 20px; border-radius: 5px;
+  border: none; background: var(--muted);
+  cursor: pointer; position: relative;
+  transition: background 0.25s; flex-shrink: 0; padding: 0;
+}
+.hana-toggle::after {
+  content: ''; position: absolute; top: 3px; left: 3px;
+  width: 14px; height: 14px; border-radius: 3px;
+  background: #fff; transition: transform 0.25s;
+}
+.hana-toggle.on { background: var(--primary); }
+.hana-toggle.on::after { transform: translateX(16px); }
+
+/* ── Settings input / textarea ── */
+.settings-input {
+  font-family: inherit; font-size: 0.85rem;
+  color: var(--foreground); background: var(--card);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 8px 10px; outline: none; width: 100%;
+  transition: border-color 0.15s;
+}
+.settings-input:focus { border-color: var(--primary); }
+.settings-textarea {
+  font-family: inherit; font-size: 0.85rem;
+  color: var(--foreground); background: var(--card);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 8px 10px; outline: none; width: 100%;
+  resize: vertical; transition: border-color 0.15s;
+}
+.settings-textarea:focus { border-color: var(--primary); }
+
+/* ── Skill / Hook cards ── */
+.skill-card, .hook-card {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--card); margin-bottom: 8px;
+}
+.skill-name, .hook-name { font-size: 0.85em; font-weight: 600; }
+.skill-desc, .hook-desc { font-size: 0.75em; color: var(--muted-fg); margin-top: 2px; }
+
+/* ── About tab ── */
+.about-version { font-size: 1.1em; font-weight: 700; margin-bottom: 8px; }
+.about-shortcut {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 0; border-bottom: 1px solid var(--border);
+  font-size: 0.82em;
+}
+.about-shortcut kbd {
+  background: var(--muted); padding: 2px 6px; border-radius: 3px;
+  font-family: monospace; font-size: 0.9em;
 }
 
 /* ── KaTeX math rendering ── */
@@ -1463,23 +1794,66 @@ select.form-input {
   color: var(--primary-fg); font-size: 0.82em; margin-bottom: 2px;
 }
 
-/* Right panel schedule */
-.rp-schedule { border-top: 1px solid var(--border); padding-top: 8px; }
-.rp-schedule-empty { padding: 12px 8px; text-align: center; color: var(--muted-fg); font-size: 0.82em; }
+/* Right panel schedule — collapsible mini calendar (like hardware monitor) */
+.rp-cal-section { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.rp-cal-toggle {
+  cursor: pointer; display: flex; align-items: center; gap: 6px;
+  font-size: 0.75em; font-weight: 600; color: var(--muted-fg);
+  text-transform: uppercase; letter-spacing: 0.3px; padding: 4px 0;
+  user-select: none; transition: color 0.2s;
+}
+.rp-cal-toggle:hover { color: var(--foreground); }
+.rp-cal-chevron { margin-left: auto; font-size: 10px; opacity: 0.6; }
+.rp-cal-preview {
+  font-size: 0.78em; color: var(--muted-fg); padding: 4px 0 2px;
+}
+.rp-cal-expanded { padding: 8px 0 4px; }
+.rp-cal-month-label {
+  font-size: 0.82em; font-weight: 700; color: var(--foreground);
+  text-align: center; padding: 4px 0 6px;
+}
+.rp-cal-grid {
+  display: grid; grid-template-columns: repeat(7, 1fr);
+  gap: 2px; margin-bottom: 8px;
+}
+.rp-cal-head {
+  text-align: center; font-size: 0.68em; font-weight: 600;
+  color: var(--muted-fg); padding: 2px 0;
+}
+.rp-cal-cell {
+  text-align: center; font-size: 0.75em; padding: 5px 0;
+  border-radius: 6px; cursor: pointer; color: var(--foreground);
+  transition: all 0.15s; user-select: none; position: relative;
+}
+.rp-cal-cell:hover { background: var(--muted); }
+.rp-cal-empty { cursor: default; background: transparent !important; }
+.rp-cal-empty:hover { background: transparent !important; }
+.rp-cal-today {
+  background: var(--primary); color: var(--primary-fg); font-weight: 700;
+}
+.rp-cal-selected {
+  outline: 2px solid var(--ring); outline-offset: -2px;
+}
+.rp-cal-has-class::after {
+  content: '';
+  position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%);
+  width: 4px; height: 4px; border-radius: 50%;
+  background: var(--primary);
+}
+.rp-cal-today.rp-cal-has-class::after { background: var(--primary-fg); }
+.rp-schedule-day-label {
+  font-size: 0.72em; font-weight: 600; color: var(--muted-fg);
+  padding: 6px 0 4px;
+}
+.rp-schedule-empty { padding: 8px; text-align: center; color: var(--muted-fg); font-size: 0.8em; }
 .rp-schedule-item {
-  padding: 6px 8px; margin: 4px 0; border-radius: 6px;
-  background: var(--muted); font-size: 0.82em;
+  padding: 6px 8px; margin: 3px 0; border-radius: 6px;
+  background: var(--muted); font-size: 0.8em;
   display: flex; align-items: center; gap: 6px;
 }
-.rp-schedule-item.active { border-left: 3px solid var(--primary); }
-.rp-schedule-item.today { background: var(--primary); color: var(--primary-fg); }
-.rp-schedule-time { font-size: 0.8em; color: var(--muted-fg); white-space: nowrap; }
+.rp-schedule-time { font-size: 0.78em; color: var(--muted-fg); white-space: nowrap; }
 .rp-schedule-subject { font-weight: 500; flex: 1; }
-.rp-schedule-room { font-size: 0.8em; color: var(--muted-fg); }
-.rp-schedule-next {
-  padding: 8px; margin: 4px 0; border-radius: 6px;
-  background: var(--accent); color: var(--accent-fg, #fff); font-size: 0.82em; font-weight: 600;
-}
+.rp-schedule-room { font-size: 0.75em; color: var(--muted-fg); }
 
 /* Schedule page */
 .schedule-page { padding: 20px; }
@@ -1517,4 +1891,57 @@ select.form-input {
 }
 .schedule-card-actions button:hover { background: rgba(255,255,255,0.35); }
 .schedule-edit, .schedule-delete { font-size: 0.9em; }
+
+/* ================================================================
+   Compose Menu — unified upload + tutor selection
+   ================================================================ */
+
+.compose-menu-btn {
+  width: 36px; height: 36px; border: none; background: transparent;
+  color: var(--muted-fg); cursor: pointer; border-radius: 10px;
+  font-size: 1.4em; display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s; flex-shrink: 0; position: relative;
+}
+.compose-menu-btn:hover { background: var(--muted); color: var(--foreground); }
+
+.compose-plus, .compose-minus {
+  position: absolute;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+  line-height: 1;
+}
+.compose-minus { opacity: 0; transform: rotate(90deg); }
+.compose-menu-btn.expanded .compose-plus { opacity: 0; transform: rotate(90deg); }
+.compose-menu-btn.expanded .compose-minus { opacity: 1; transform: rotate(0deg); }
+
+.compose-menu {
+  position: absolute; bottom: calc(100% + 8px); left: 20px;
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: var(--shadow-lg);
+  padding: 6px; z-index: 100; min-width: 200px;
+  animation: fade-in 0.15s ease-out;
+}
+.compose-menu.hidden { display: none !important; }
+
+.compose-menu-section { margin-bottom: 4px; }
+.compose-menu-section:last-child { margin-bottom: 0; }
+
+.compose-menu-label {
+  font-size: 0.7em; font-weight: 600; color: var(--muted-fg);
+  padding: 4px 8px; text-transform: uppercase; letter-spacing: 0.5px;
+}
+
+.compose-menu-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: 8px; cursor: pointer;
+  font-size: 0.85em; color: var(--foreground);
+  transition: background 0.15s;
+}
+.compose-menu-item:hover { background: var(--muted); }
+
+.tutor-menu-item { border-left: 3px solid transparent; }
+.tutor-menu-item:hover { border-left-color: var(--primary); }
+.tutor-menu-item.active {
+  background: var(--info-bg); border-left-color: var(--primary);
+  font-weight: 600;
+}
 

@@ -15,6 +15,7 @@
 
 - Python 3.10+
 - CUDA 12.x（GPU 加速，可选）
+- Node.js 18+（桌面版，可选）
 
 ### 安装
 
@@ -34,9 +35,16 @@ cp .env.example .env
 
 ### 启动
 
+**浏览器模式：**
 ```bash
 python asr_api_server.py
-# 或双击 start.bat (Windows)
+# 或双击 start-browser.vbs (隐藏终端启动)
+```
+
+**桌面应用模式：**
+```bash
+npm install && npm start
+# 或双击 start.vbs (隐藏终端启动)
 ```
 
 访问 http://localhost:8000
@@ -48,6 +56,8 @@ asr_api_server.py      # 主服务（FastAPI）
 config.py              # 配置管理
 nanobot_manager.py     # Nanobot Agent 管理
 frontend/              # 前端 SPA（HTML/CSS/JS）
+electron/              # Electron 桌面应用封装
+docs/                  # 项目文档
 requirements.txt       # Python 依赖
 .env.example           # 环境变量模板
 ```

@@ -143,11 +143,13 @@ function openCourseEditor(id) {
       if (idx >= 0) entries[idx] = entry;
     } else {
       entries.push(entry);
+      // Auto-create tutor for new course
+      createTutorForCourse(entry.subject);
     }
     saveSchedule(entries);
     overlay.remove();
     renderTable();
-    toast(existing ? '已更新' : '已添加', 'success');
+    toast(existing ? '已更新' : '已添加' + (!existing ? '（导师已自动创建）' : ''), 'success');
   });
 }
 
@@ -162,4 +164,68 @@ function deleteCourse(id) {
 function esc(s) {
   if (!s) return '';
   return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[m]));
+}
+
+async function createTutorForCourse(subject) {
+  const { API } = await import('../api.js');
+  if (!API?.nanobotCreateTutor) return;
+
+  // Create with default soul immediately
+  const defaultSoul = `你是一名${subject}课程导师，擅长用清晰易懂的方式讲解相关知识。回答时请结合实际例子，语言简洁专业。`;
+  try {
+    await API.nanobotCreateTutor(subject, defaultSoul);
+  } catch {
+    // Tutor may already exist — non-critical
+  }
+
+  // Async: generate better SOUL.md via LLM and update
+  try {
+    const config = loadLlmConfig();
+    if (!config?.api_url || !config?.api_key) return;
+
+    const prompt = `请为课程"${subject}"生成一段导师人设（150字以内），包含：学科定位、教学风格和回答规范。只输出人设正文，不要标题或格式。`;
+    const res = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: [
+          { role: 'system', content: '你是一名教育专家，擅长为各学科课程设计AI导师人设。' },
+          { role: 'user', content: prompt },
+        ],
+        model: config.model_name,
+        temperature: 0.7,
+        api_url: config.api_url,
+        api_key: config.api_key,
+      }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const soul = data.choices?.[0]?.message?.content?.trim();
+    if (soul) {
+      await API.nanobotSetTutorSoul(subject, soul);
+    }
+  } catch {
+    // Non-critical: default soul is already serviceable
+  }
+}
+
+function loadLlmConfig() {
+  try {
+    const active = localStorage.getItem('asr_llm_config_active') || 'sensenova';
+    const saved = JSON.parse(localStorage.getItem('asr_llm_config_' + active) || '{}');
+    const presets = {
+      sensenova:  { url: 'https://token.sensenova.cn/v1', model: 'deepseek-v4-flash' },
+      deepseek:   { url: 'https://api.deepseek.com', model: 'deepseek-chat' },
+      openai:     { url: 'https://api.openai.com/v1', model: 'gpt-4o' },
+      modelscope: { url: 'https://api-inference.modelscope.cn/v1', model: 'ZhipuAI/GLM-5' },
+      ollama:     { url: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
+      nanobot:    { url: 'http://127.0.0.1:18900/v1', model: 'nanobot' },
+    };
+    const p = presets[active] || {};
+    return {
+      api_url: saved.api_url || p.url || '',
+      api_key: saved.api_key || '',
+      model_name: saved.model_name || p.model || '',
+    };
+  } catch { return {}; }
 }

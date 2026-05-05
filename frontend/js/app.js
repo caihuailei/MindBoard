@@ -194,11 +194,36 @@ function refreshSidebarSessions() {
   Sidebar.updateSessions(sessions, activeId);
 }
 
+// ── Electron frameless window setup ──
+function initElectronTitlebar() {
+  if (!window.electronAPI) return;
+
+  const tb = document.getElementById('titlebar');
+  if (!tb) return;
+  tb.style.display = 'flex';
+  document.documentElement.classList.add('electron-mode');
+
+  document.getElementById('wcMinimize')?.addEventListener('click', () => window.electronAPI.windowMinimize());
+  document.getElementById('wcMaximize')?.addEventListener('click', () => window.electronAPI.windowMaximize());
+  document.getElementById('wcClose')?.addEventListener('click', () => window.electronAPI.windowClose());
+
+  // Update maximize icon
+  const maxIcon = document.getElementById('wcMaxIcon');
+  if (maxIcon) {
+    window.electronAPI.windowIsMaximized().then(maxed => {
+      if (maxed) {
+        maxIcon.innerHTML = '<><rect x="3" y="1" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="1" y="3" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.2"/></>';
+      }
+    });
+  }
+}
+
 // ES modules are deferred — DOM is already ready when this executes
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', run);
+  document.addEventListener('DOMContentLoaded', () => { run(); initElectronTitlebar(); });
 } else {
   run();
+  initElectronTitlebar();
 }
 
 function escapeHtml(s) {
